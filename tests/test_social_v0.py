@@ -7,15 +7,13 @@ from social_gnn.models import SocialV0
 
 
 class SocialV0Test(unittest.TestCase):
-    def test_edge_value_confidence_and_coverage_are_separate_channels(self):
+    def test_edge_value_and_coverage_aware_confidence_make_16_channels(self):
         values = torch.ones(2, 3, 2, 2, 8)
         confidence = torch.full_like(values, 0.5)
-        coverage = torch.full_like(values, 0.25)
-        combined = compose_edge_inputs(values, confidence, coverage)
-        self.assertEqual(tuple(combined.shape), (2, 3, 2, 2, 24))
+        combined = compose_edge_inputs(values, confidence)
+        self.assertEqual(tuple(combined.shape), (2, 3, 2, 2, 16))
         self.assertTrue(torch.equal(combined[..., :8], values))
-        self.assertTrue(torch.equal(combined[..., 8:16], confidence))
-        self.assertTrue(torch.equal(combined[..., 16:], coverage))
+        self.assertTrue(torch.equal(combined[..., 8:], confidence))
 
     def test_directed_complete_graph(self):
         edge_index = complete_directed_edge_index(3)

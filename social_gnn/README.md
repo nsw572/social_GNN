@@ -8,12 +8,12 @@ relational features.
 import torch
 from social_gnn import SocialV0, compose_edge_inputs
 
-model = SocialV0(node_dim=128, edge_dim=24, hidden_dim=64)
+model = SocialV0(node_dim=128, edge_dim=16, hidden_dim=64)
 h = torch.randn(8, 100, 2, 128)                 # [batch, patches, mice, latent]
 value = torch.randn(8, 100, 2, 2, 8)            # eight physical traits
 confidence = torch.rand(8, 100, 2, 2, 8)        # per-trait confidence
-coverage = torch.rand(8, 100, 2, 2, 8)          # per-trait frame coverage
-edges = compose_edge_inputs(value, confidence, coverage)
+coverage = torch.rand(8, 100, 2, 2, 8)          # separate QC tensor, not model input
+edges = compose_edge_inputs(value, confidence)  # 8 values + 8 confidences
 social_latent = model(h, edges)                 # [8, 100, 64]
 ```
 
@@ -123,6 +123,9 @@ Patch values are confidence-weighted means. Patch confidence is the sum of
 valid frame confidences divided by all video frames in the patch, and coverage
 is the valid-frame fraction. Missing traits have value/confidence/coverage zero;
 the physical value is never multiplied by confidence in the saved contract.
+Because patch confidence already includes coverage, the default GNN input is
+the 16-channel concatenation `[edge_value, edge_confidence]`. The separately
+stored coverage tensor is a QC/ablation signal and is not duplicated in V0.
 
 Enable the final pipeline stage only after supplying the upstream duration:
 

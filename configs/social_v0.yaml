@@ -1,7 +1,7 @@
 version: social_v0
 model: gine
 node_dim: 128  # dimension of continuous IMU latent h_i^t
-edge_dim: 24   # 8 values + 8 per-trait confidences + 8 per-trait coverages
+edge_dim: 16   # 8 values + 8 coverage-aware per-trait confidences
 hidden_dim: 64
 layers: 2
 graph: complete_directed

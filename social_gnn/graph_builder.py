@@ -23,20 +23,21 @@ def complete_directed_edge_index(
 def compose_edge_inputs(
     edge_value: torch.Tensor,
     edge_confidence: torch.Tensor,
-    edge_coverage: torch.Tensor,
 ) -> torch.Tensor:
     """Concatenate separate edge channels without multiplying values by confidence.
 
-    Inputs share shape ``[..., 8]``. The returned ``[..., 24]`` channel order is
-    value, confidence, then coverage.
+    Inputs share shape ``[..., 8]``. The returned ``[..., 16]`` channel order is
+    value then per-trait confidence. Patch confidence already accounts for valid
+    frame coverage; the separately exported coverage tensor is retained for QC
+    rather than duplicated in the default model input.
     """
-    if not edge_value.shape == edge_confidence.shape == edge_coverage.shape:
-        raise ValueError("edge value, confidence, and coverage shapes must match")
+    if edge_value.shape != edge_confidence.shape:
+        raise ValueError("edge value and confidence shapes must match")
     if edge_value.ndim < 2:
         raise ValueError("edge inputs must include edge and trait dimensions")
     if edge_value.shape[-1] != 8:
         raise ValueError("the V0 social edge contract contains exactly 8 traits")
-    return torch.cat((edge_value, edge_confidence, edge_coverage), dim=-1)
+    return torch.cat((edge_value, edge_confidence), dim=-1)
 
 
 def validate_v0_inputs(
