@@ -1,0 +1,12 @@
+version: social_v0
+model: gine
+node_dim: 128  # dimension of continuous IMU latent h_i^t
+edge_dim: 24   # 8 values + 8 per-trait confidences + 8 per-trait coverages
+hidden_dim: 64
+layers: 2
+graph: complete_directed
+self_loops: false
+single_animal: bypass
+downstream:
+  clustering: kmeans
+  n_clusters: 8

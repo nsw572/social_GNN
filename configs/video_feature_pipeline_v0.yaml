@@ -1,0 +1,137 @@
+version: video_feature_pipeline_v0
+
+videos:
+  - id: data1_001
+    # Optional: exact number of upstream node timesteps for this video.
+    social_patch_count: null
+    path: 'D:\wxh本地化处理库\DLC\headpoint-wxh-2026-07-27\videos\data1_001.mp4'
+
+# Keep generated videos, predictions, sessions, and logs outside the code tree.
+output_root: 'C:\Users\DELL\Desktop\video_edge_inputs_v0'
+
+pipeline:
+  # For each video, MouseGPT and idtracker.ai are launched concurrently.
+  parallel_branches: true
+  resume: true
+  fail_fast: true
+  dry_run: false
+
+mousegpt:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\mmpose310\python.exe'
+  workdir: 'C:\Users\DELL\MouseGPT_code_submit\1_keypoints\demo'
+  inferencer_script: 'C:\Users\DELL\MouseGPT_code_submit\1_keypoints\demo\inferencer_demo.py'
+  pose_config: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\pose_config.py'
+  pose_weights: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\pose_weights.pth'
+  det_config: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\yolo_config.py'
+  det_weights: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\yolo_weights.pth'
+  device: 'cuda:0'
+  draw_bbox: true
+  save_visualization: true
+  bbox_threshold: 0.6
+  nms_threshold: 0.1
+  keypoint_threshold: 0.3
+  extra_args: []
+
+  postprocess:
+    enabled: true
+    python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+    script: 'C:\Users\DELL\Desktop\deepOF\roughanalysis\mousegpt_head_direction_segments.py'
+    score_threshold: 0.3
+    max_match_distance: 700.0
+    max_track_gap_frames: 30
+    max_tracks: 2
+    # Edge extraction needs CSV/Pickle, not another multi-GB overlay video.
+    skip_videos: true
+    extra_args: []
+
+idtrackerai:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\idtrackerai\python.exe'
+  source_dir: 'C:\Users\DELL\Desktop\deepOF\idtrackerai_editable'
+
+  # first_video: tune the first video in GUI, save a reusable TOML automatically,
+  #              then run later videos headlessly.
+  # every_video: open the GUI for every video and save parameters_used.toml per video.
+  # never:       require an existing reusable_parameters_file and never open the GUI.
+  gui_policy: first_video
+  force_recalibrate: false
+  reusable_parameters_file: 'C:\Users\DELL\Desktop\video_edge_inputs_v0\_idtrackerai\reusable_parameters.toml'
+  bootstrap_parameters_file: null
+
+  number_of_animals: 2
+  trajectories_formats: [npy, csv_tidy]
+  data_policy: all
+  device: 'cuda:0'
+  number_of_parallel_workers: 0
+  extra_args: []
+
+  export:
+    enabled: true
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\idtracker_export.py'
+    # backward matches roughanalysis/idtracker_speed_visualization.py.
+    velocity_method: backward
+
+  # Optional retrospective repair after idtracker.ai has finished. Keep this off
+  # until the contact/recovery heuristic has been checked on representative data.
+  # When enabled, MouseGPT is matched against the repaired centroids automatically.
+  smoothing:
+    enabled: false  # 是否在 idtracker.ai 基础上启动额外平滑
+    python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\idtracker_identity_smoothing.py'
+    speed_multiplier: 5.0
+    robust_mean_upper_quantile: 0.99
+    minimum_speed_similarity_ratio: 0.80
+    maximum_displacement_cosine: -0.80
+    contact_distance_body_lengths: 0.35
+    contact_window_frames: 2
+    max_seed_gap_frames: 2
+    identity_contact_distance_body_lengths: 0.20
+    maximum_cross_identity_endpoint_ratio: 0.25
+    maximum_swap_pair_gap_seconds: 5.0
+    transition_speed_cap_multiplier: 5.0
+    maximum_transition_expansion_seconds: 1.0
+    interpolation_confidence: 0.05
+
+identity_matching:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\identity_matching.py'
+
+  # Defaults measured on data1_001: median assigned distance ~= 34 px,
+  # 99th percentile ~= 106 px. The 200 px gate leaves room for outliers.
+  max_distance_px: 200.0
+  min_assignment_margin_px: 100.0
+  distance_confidence_scale_px: 100.0
+  margin_confidence_scale_px: 300.0
+  min_anchor_confidence: 0.30
+
+  # This module is QA-only. Disable it for the final large-scale pipeline
+  # without changing identity matching or any tabular output.
+  visualization:
+    enabled: true
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\identity_match_visualization.py'
+    frame_start: 0
+    frame_end: null  # exclusive; null renders the complete video
+    max_width: 1920
+    max_height: 1080
+    codec: mp4v
+    # QA rendering is CPU-only. These limits reduce interference with long GPU jobs.
+    opencv_threads: 1
+    low_priority: true
+    draw_keypoints: true
+    draw_bboxes: true
+    draw_head_direction: true
+
+edge_extraction:
+  # Set this to the minimum upstream IMU patch duration before enabling.
+  enabled: false
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\edge_extraction.py'
+  patch_length_s: null
+  clock_start_s: 0.0
+  # videos[].social_patch_count takes precedence. If both counts are null,
+  # only complete fixed patches covered by the video are emitted.
+  patch_count: null
+  minimum_movement_speed_px_s: 1.0
+  save_frame_level: true

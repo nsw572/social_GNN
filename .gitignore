@@ -1,0 +1,29 @@
+/*
+!/.gitignore
+!/README.md
+!/social_gnn/
+!/configs/
+!/tests/
+
+**/__pycache__/
+*.py[cod]
+*.log
+*.mp4
+*.avi
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.csv
+*.json
+*.html
+*.toml
+
+# Keep source configuration files, but never generated pipeline manifests.
+!configs/*.yaml
+!configs/*.yml
+
+# Tests are source files only.
+!tests/*.py
