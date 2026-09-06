@@ -22,6 +22,123 @@ deliberate: PyTorch Geometric is not installed in the current interpreter.
 Once the input contract is validated on real data, the layer can be swapped
 for `GINEConv` without changing the dataset or downstream representation API.
 
+## Temporal social state
+
+`SocialGNNWithTCN` implements the currently available part of the intended
+training path:
+
+```text
+Graph sequence -> patch-wise GNN -> causal TCN -> s_t -> future SSL decoder
+```
+
+The GNN first produces an independent graph embedding `g_t` for every fixed
+social patch. A residual TCN then computes
+
+```text
+s_t = TCN(g_1, ..., g_t)
+```
+
+using left-only padding, so changing a future patch cannot change a past
+state. Dilations grow geometrically across TCN levels. Because each residual
+block contains two convolutions, its receptive field in patches is
+
+```text
+1 + 2 * (kernel_size - 1) * sum(dilations).
+```
+
+The default four levels use dilations `(1, 2, 4, 8)` and kernel size `3`, for a
+61-patch receptive field. A `[B,T]` time mask supports padded trials; masked
+states are zeroed after every block and cannot inject values into later valid
+states.
+
+```python
+from social_gnn import SocialGNNWithTCN
+
+encoder = SocialGNNWithTCN(
+    node_dim=128,
+    edge_dim=16,
+    graph_hidden_dim=64,
+    temporal_hidden_dim=64,
+    tcn_levels=4,
+)
+s_t = encoder(h, edges, node_mask=node_mask, time_mask=time_mask)
+# s_t: [batch, social_patches, 64]
+```
+
+The SSL decoder, prediction target, and loss are intentionally outside this
+module until the self-supervised objective is selected. They should consume
+`s_t` without changing the graph/temporal encoder contract.
+
+## Full-trial data loading
+
+`SocialTrialPackage` represents one complete trial. It validates all arrays
+before exposing them to PyTorch and raises `SocialTrialValidationError` with
+the trial ID when node/edge clocks, identity order, shapes, finite values, or
+confidence ranges disagree. Stored NumPy arrays are copied and made read-only.
+
+For large datasets, use `SocialTrialSource` so each node/edge NPZ pair is loaded
+lazily by the Dataset worker instead of loading every trial into RAM:
+
+```python
+import torch
+from social_gnn import (
+    SocialGNNWithTCN,
+    SocialTrialDataset,
+    SocialTrialSource,
+    build_social_dataloader,
+    compose_edge_inputs,
+)
+
+sources = [
+    SocialTrialSource(
+        trial_id="trial_001",
+        node_path=r"D:\social_trials\trial_001\node_features.npz",
+        edge_path=r"D:\social_trials\trial_001\trial_001_social_edges.npz",
+    ),
+    SocialTrialSource(
+        trial_id="trial_002",
+        node_path=r"D:\social_trials\trial_002\node_features.npz",
+        edge_path=r"D:\social_trials\trial_002\trial_002_social_edges.npz",
+    ),
+]
+dataset = SocialTrialDataset(sources)
+loader = build_social_dataloader(dataset, batch_size=2, shuffle=True)
+
+model = SocialGNNWithTCN(node_dim=128, edge_dim=16)
+for batch in loader:
+    edge_features = compose_edge_inputs(
+        batch["edge_values"], batch["edge_confidence"]
+    )
+    s_t = model(
+        batch["node_features"],
+        edge_features,
+        node_mask=batch["node_mask"],
+        time_mask=batch["time_mask"],
+    )
+```
+
+One Dataset item always equals one full trial. The collate function pads only
+the time dimension to the longest trial in the current batch and returns
+`time_mask [B,T]`; it never concatenates timelines across trials. `shuffle`
+therefore changes only trial order. All padded tensor values and masks are zero,
+while `sequence_length`, `identity`, and `trial_id` preserve batch metadata.
+
+The node NPZ must contain `node_features`, `node_mask`, `patch_start_s`,
+`patch_end_s`, and `identity`. The edge NPZ may use canonical `edge_values` and
+`edge_confidence` keys or the existing extractor keys `edge_value_dense` and
+`edge_confidence_dense`; it must also contain the same timestamps and identity
+order.
+
+Every Dataset access returns newly allocated tensors. Future SSL code should
+keep the returned batch as the unmodified target and create masked/augmented
+input clones dynamically, for example:
+
+```python
+ssl_node_input = batch["node_features"].clone()
+ssl_edge_input = batch["edge_values"].clone()
+# Apply random masks to the clones; the original batch remains the target.
+```
+
 ## Video feature extraction
 
 `video_feature_pipeline.py` launches MouseGPT and idtracker.ai concurrently for

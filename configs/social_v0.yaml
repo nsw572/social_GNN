@@ -7,6 +7,13 @@ layers: 2
 graph: complete_directed
 self_loops: false
 single_animal: bypass
+temporal:
+  model: causal_tcn
+  hidden_dim: 64       # dimension of social state s_t
+  levels: 4
+  kernel_size: 3
+  dilation_base: 2
+  dropout: 0.1
 downstream:
   clustering: kmeans
   n_clusters: 8
