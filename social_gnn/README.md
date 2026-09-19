@@ -71,6 +71,22 @@ module until the self-supervised objective is selected. They should consume
 
 ## Full-trial data loading
 
+Convert an upstream H ZIP (`latents.npz`, `patches.csv`, `meta.json`) into the
+canonical node NPZ first. The converter preserves `t_start`/`t_end` exactly,
+including overlapping patches, and maps `drop_flag` to `node_mask`. For the
+current idtracker identity order, explicitly choose matching output labels:
+
+```powershell
+python social_gnn\h_zip_node_converter.py `
+  --h-zip D:\input\trial.zip `
+  --output-node-npz D:\social_trials\trial_001\node_features.npz `
+  --output-identity 0 1
+```
+
+Exact duplicate latent streams are rejected as a likely upstream recombination
+failure. `--allow-duplicate-nodes` exists only for interface tests; its output
+is marked `training_eligible=false`.
+
 `SocialTrialPackage` represents one complete trial. It validates all arrays
 before exposing them to PyTorch and raises `SocialTrialValidationError` with
 the trial ID when node/edge clocks, identity order, shapes, finite values, or
@@ -220,12 +236,13 @@ identity_matching:
     enabled: false
 ```
 
-## Fixed-clock edge extraction
+## Authoritative-clock edge extraction
 
 `edge_extraction.py` computes eight directed frame-level relations and then
-aggregates them into fixed social patches. `patch_length_s` is deliberately a
-required runtime value: set it to the minimum upstream node-patch duration.
-No DeepOF/video window length is used as a substitute.
+aggregates them into the exact physical intervals stored by the node NPZ. This
+is important for upstream clocks whose patch duration and stride differ, such
+as 0.32 s patches emitted every 0.16 s. Overlapping intervals are aggregated
+independently; they are not rewritten into contiguous bins.
 
 Frames are assigned to half-open intervals `[patch_start_s, patch_end_s)`. The
 stored contract keeps three arrays separate:
@@ -244,14 +261,21 @@ Because patch confidence already includes coverage, the default GNN input is
 the 16-channel concatenation `[edge_value, edge_confidence]`. The separately
 stored coverage tensor is a QC/ablation signal and is not duplicated in V0.
 
-Enable the final pipeline stage only after supplying the upstream duration:
+Configure each video with its corresponding canonical node clock:
 
 ```yaml
+videos:
+  - id: trial_001
+    path: D:\videos\trial_001.mp4
+    node_clock_npz: D:\social_trials\trial_001\node_features.npz
+
 edge_extraction:
   enabled: true
-  patch_length_s: 0.125  # example only; use the actual upstream value
+  clock_node_npz: null
+  patch_length_s: null
 ```
 
-Set `videos[].social_patch_count` when the authoritative number of node
-timesteps is available. Otherwise the extractor emits only complete patches
-covered by the video and drops an incomplete tail.
+`edge_extraction.clock_node_npz` is an optional global fallback. The old
+`patch_length_s` plus `social_patch_count` mode remains available only for
+development before an upstream node clock exists. `SocialTrialPackage.from_npz`
+then verifies exact node/edge identity and patch-time equality before training.

@@ -46,6 +46,7 @@ class VideoJob:
     video_path: Path
     output_dir: Path
     social_patch_count: int | None = None
+    node_clock_npz: Path | None = None
 
 
 def _now_iso() -> str:
@@ -119,15 +120,33 @@ def build_jobs(
         )
         if social_patch_count is not None and social_patch_count < 1:
             raise ValueError("social_patch_count must be >= 1")
+        node_clock_npz = (
+            Path(item["node_clock_npz"]).resolve()
+            if isinstance(item, dict) and item.get("node_clock_npz")
+            else None
+        )
+        if node_clock_npz is not None and not node_clock_npz.is_file():
+            raise FileNotFoundError(
+                f"Authoritative node clock not found: {node_clock_npz}"
+            )
         jobs.append(
             VideoJob(
                 video_id,
                 video_path,
                 output_root / video_id,
                 social_patch_count=social_patch_count,
+                node_clock_npz=node_clock_npz,
             )
         )
     return jobs
+
+
+def _edge_clock_for_job(config: dict[str, Any], job: VideoJob) -> Path | None:
+    """Resolve per-video clock first, then the optional global fallback."""
+    if job.node_clock_npz is not None:
+        return job.node_clock_npz
+    configured = config.get("edge_extraction", {}).get("clock_node_npz")
+    return Path(configured).resolve() if configured else None
 
 
 def _require_file(path_value: str | Path, label: str) -> Path:
@@ -210,11 +229,28 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError("edge extraction requires identity matching")
         _require_file(edge_extraction["python"], "edge extraction Python")
         _require_file(edge_extraction["script"], "edge extraction script")
+        global_clock = edge_extraction.get("clock_node_npz")
+        configured_videos = config.get("videos") or []
+        per_video_clocks = bool(configured_videos) and all(
+            isinstance(item, dict) and item.get("node_clock_npz")
+            for item in configured_videos
+        )
+        if global_clock:
+            _require_file(global_clock, "authoritative node clock")
+        if per_video_clocks:
+            for item in configured_videos:
+                _require_file(
+                    item["node_clock_npz"],
+                    f"authoritative node clock for {item.get('id', item['path'])}",
+                )
         patch_length_s = edge_extraction.get("patch_length_s")
-        if patch_length_s is None or float(patch_length_s) <= 0:
+        if not global_clock and not per_video_clocks and (
+            patch_length_s is None or float(patch_length_s) <= 0
+        ):
             raise ValueError(
-                "edge_extraction.patch_length_s must be set to the minimum "
-                "upstream node patch duration before enabling edge extraction"
+                "Enable edge extraction with either videos[].node_clock_npz, "
+                "edge_extraction.clock_node_npz, or a positive legacy "
+                "edge_extraction.patch_length_s"
             )
 
 
@@ -970,20 +1006,34 @@ def build_edge_extraction_command(
         str(output_dir),
         "--output-stem",
         job.video_id,
-        "--patch-length-s",
-        str(edge_cfg["patch_length_s"]),
-        "--clock-start-s",
-        str(edge_cfg.get("clock_start_s", 0.0)),
         "--minimum-movement-speed-px-s",
         str(edge_cfg.get("minimum_movement_speed_px_s", 1.0)),
     ]
-    patch_count = (
-        job.social_patch_count
-        if job.social_patch_count is not None
-        else edge_cfg.get("patch_count")
-    )
-    if patch_count is not None:
-        command.extend(["--patch-count", str(patch_count)])
+    clock_node_npz = _edge_clock_for_job(config, job)
+    if clock_node_npz is not None:
+        command.extend(["--clock-node-npz", str(clock_node_npz)])
+    else:
+        patch_length_s = edge_cfg.get("patch_length_s")
+        if patch_length_s is None or float(patch_length_s) <= 0:
+            raise ValueError(
+                f"Video {job.video_id!r} has no authoritative node clock and "
+                "no positive legacy patch_length_s"
+            )
+        command.extend(
+            [
+                "--patch-length-s",
+                str(patch_length_s),
+                "--clock-start-s",
+                str(edge_cfg.get("clock_start_s", 0.0)),
+            ]
+        )
+        patch_count = (
+            job.social_patch_count
+            if job.social_patch_count is not None
+            else edge_cfg.get("patch_count")
+        )
+        if patch_count is not None:
+            command.extend(["--patch-count", str(patch_count)])
     if not edge_cfg.get("save_frame_level", True):
         command.append("--no-frame-level")
     return command
@@ -994,8 +1044,9 @@ def _edge_outputs_are_current(
     *,
     idtracker_csv: Path,
     matched_mousegpt_csv: Path,
-    patch_length_s: float,
+    patch_length_s: float | None,
     patch_count: int | None,
+    clock_node_npz: Path | None = None,
 ) -> bool:
     if not summary_json.is_file():
         return False
@@ -1008,6 +1059,16 @@ def _edge_outputs_are_current(
             and Path(summary["matched_mousegpt_csv"]).resolve()
             == matched_mousegpt_csv.resolve()
         )
+        if clock_node_npz is not None:
+            stat = clock_node_npz.stat()
+            clock_matches = (
+                parameters.get("clock_mode") == "authoritative_node_intervals"
+                and Path(parameters["clock_node_npz"]).resolve()
+                == clock_node_npz.resolve()
+                and int(parameters["clock_source_size"]) == stat.st_size
+                and int(parameters["clock_source_mtime_ns"]) == stat.st_mtime_ns
+            )
+            return source_matches and clock_matches
         duration_matches = math.isclose(
             float(parameters["patch_length_s"]),
             float(patch_length_s),
@@ -1036,18 +1097,29 @@ def run_edge_extraction_stage(
     output_csv = output_dir / f"{job.video_id}_social_edges.csv"
     output_npz = output_dir / f"{job.video_id}_social_edges.npz"
     summary_json = output_dir / f"{job.video_id}_social_edges_summary.json"
+    clock_node_npz = _edge_clock_for_job(config, job)
+    patch_length_s = (
+        None
+        if clock_node_npz is not None
+        else float(edge_cfg["patch_length_s"])
+    )
     patch_count = (
-        job.social_patch_count
-        if job.social_patch_count is not None
-        else edge_cfg.get("patch_count")
+        None
+        if clock_node_npz is not None
+        else (
+            job.social_patch_count
+            if job.social_patch_count is not None
+            else edge_cfg.get("patch_count")
+        )
     )
     outputs_exist = all(path.is_file() for path in (output_csv, output_npz, summary_json))
     current = outputs_exist and _edge_outputs_are_current(
         summary_json,
         idtracker_csv=idtracker_csv,
         matched_mousegpt_csv=matched_mousegpt_csv,
-        patch_length_s=float(edge_cfg["patch_length_s"]),
+        patch_length_s=patch_length_s,
         patch_count=int(patch_count) if patch_count is not None else None,
+        clock_node_npz=clock_node_npz,
     )
     if resume and current:
         extraction_result: dict[str, Any] = {"status": "skipped_existing"}
@@ -1074,7 +1146,15 @@ def run_edge_extraction_stage(
             )
     return {
         "status": "dry_run" if dry_run else "completed",
-        "patch_length_s": float(edge_cfg["patch_length_s"]),
+        "clock_mode": (
+            "authoritative_node_intervals"
+            if clock_node_npz is not None
+            else "fixed_patch_length"
+        ),
+        "clock_node_npz": (
+            str(clock_node_npz) if clock_node_npz is not None else None
+        ),
+        "patch_length_s": patch_length_s,
         "patch_count": int(patch_count) if patch_count is not None else None,
         "edge_csv": str(output_csv),
         "edge_npz": str(output_npz),

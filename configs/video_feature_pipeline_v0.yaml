@@ -2,7 +2,10 @@ version: video_feature_pipeline_v0
 
 videos:
   - id: data1_001
-    # Optional: exact number of upstream node timesteps for this video.
+    # Preferred: canonical NPZ from h_zip_node_converter.py. Its exact,
+    # potentially overlapping patch intervals become the social clock.
+    node_clock_npz: null
+    # Legacy fixed-clock fallback only.
     social_patch_count: null
     path: 'D:\wxh本地化处理库\DLC\headpoint-wxh-2026-07-27\videos\data1_001.mp4'
 
@@ -124,10 +127,13 @@ identity_matching:
     draw_head_direction: true
 
 edge_extraction:
-  # Set this to the minimum upstream IMU patch duration before enabling.
   enabled: false
   python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
   script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\edge_extraction.py'
+  # Optional global clock fallback. Prefer videos[].node_clock_npz when each
+  # video has a different trial package.
+  clock_node_npz: null
+  # Legacy mode only: use this before an authoritative node NPZ exists.
   patch_length_s: null
   clock_start_s: 0.0
   # videos[].social_patch_count takes precedence. If both counts are null,

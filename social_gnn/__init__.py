@@ -13,11 +13,13 @@ from .data import (
     collate_social_trials,
 )
 from .graph_builder import complete_directed_edge_index, compose_edge_inputs
+from .h_zip_node_converter import HZipConversionError, convert_h_zip_to_node_npz
 from .models import SocialGNNWithTCN, SocialV0
 from .temporal import TemporalConvNet
 
 __all__ = [
     "SocialGNNWithTCN",
+    "HZipConversionError",
     "SocialTrialDataset",
     "SocialTrialPackage",
     "SocialTrialSource",
@@ -28,4 +30,5 @@ __all__ = [
     "collate_social_trials",
     "complete_directed_edge_index",
     "compose_edge_inputs",
+    "convert_h_zip_to_node_npz",
 ]

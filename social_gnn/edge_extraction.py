@@ -1,8 +1,9 @@
-"""Build confidence-aware, fixed-clock social edge features from video outputs.
+"""Build confidence-aware social edge features from aligned video outputs.
 
 Inputs are the frame-aligned idtracker.ai kinematics CSV and the MouseGPT table
-already matched to idtracker.ai identities.  The social clock is generated from
-one required, fixed ``patch_length_s`` value; no video window size is guessed.
+already matched to idtracker.ai identities.  Prefer an authoritative node NPZ
+clock; the legacy fixed ``patch_length_s`` clock remains available for cases
+where upstream node data has not arrived yet.
 """
 
 from __future__ import annotations
@@ -17,6 +18,11 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+try:  # Support both ``python -m social_gnn...`` and direct script execution.
+    from .authoritative_clock import load_node_clock
+except ImportError:  # pragma: no cover - exercised by Windows pipeline execution
+    from authoritative_clock import load_node_clock
 
 
 TRAIT_NAMES = (
@@ -631,17 +637,56 @@ def extract_social_edges(
     patch_count: int | None = None,
     minimum_movement_speed_px_s: float = 1.0,
 ) -> EdgeExtractionResult:
-    edge_index, edge_identity, frame_value, frame_confidence = (
-        compute_frame_edge_traits(
-            inputs,
-            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-        )
-    )
     social_step, patch_start_s, patch_end_s = build_fixed_social_clock(
         inputs.frame_time_s,
         patch_length_s=patch_length_s,
         clock_start_s=clock_start_s,
         patch_count=patch_count,
+    )
+    return extract_social_edges_on_clock(
+        inputs,
+        social_step=social_step,
+        patch_start_s=patch_start_s,
+        patch_end_s=patch_end_s,
+        minimum_movement_speed_px_s=minimum_movement_speed_px_s,
+        clock_parameters={
+            "clock_mode": "fixed_patch_length",
+            "patch_length_s": float(patch_length_s),
+            "clock_start_s": float(clock_start_s),
+            "patch_count_source": (
+                "explicit" if patch_count is not None else "full_video_floor"
+            ),
+            "incomplete_tail_policy": "drop_unless_patch_count_is_explicit",
+        },
+    )
+
+
+def extract_social_edges_on_clock(
+    inputs: FrameInputs,
+    *,
+    social_step: np.ndarray,
+    patch_start_s: np.ndarray,
+    patch_end_s: np.ndarray,
+    minimum_movement_speed_px_s: float = 1.0,
+    clock_parameters: dict[str, Any] | None = None,
+) -> EdgeExtractionResult:
+    """Aggregate edges on caller-supplied physical time intervals."""
+    social_step = np.asarray(social_step, dtype=np.int64)
+    patch_start_s = np.asarray(patch_start_s, dtype=np.float64)
+    patch_end_s = np.asarray(patch_end_s, dtype=np.float64)
+    if not (
+        social_step.ndim == patch_start_s.ndim == patch_end_s.ndim == 1
+        and len(social_step) == len(patch_start_s) == len(patch_end_s)
+        and len(social_step) > 0
+    ):
+        raise ValueError(
+            "social_step and patch interval arrays must be equal non-empty 1-D arrays"
+        )
+    edge_index, edge_identity, frame_value, frame_confidence = (
+        compute_frame_edge_traits(
+            inputs,
+            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
+        )
     )
     (
         patch_frame_count,
@@ -655,6 +700,18 @@ def extract_social_edges(
         frame_edge_confidence=frame_confidence,
         patch_start_s=patch_start_s,
         patch_end_s=patch_end_s,
+    )
+    parameters = dict(clock_parameters or {})
+    parameters.update(
+        {
+            "patch_count": int(len(social_step)),
+            "minimum_movement_speed_px_s": float(minimum_movement_speed_px_s),
+            "patch_interval_convention": "[patch_start_s, patch_end_s)",
+            "motion_boundary_policy": (
+                "Exclude each patch's first frame from velocity-derived traits because "
+                "backward velocity uses the preceding frame outside that patch"
+            ),
+        }
     )
     return EdgeExtractionResult(
         frame_ids=inputs.frame_ids,
@@ -672,19 +729,7 @@ def extract_social_edges(
         edge_confidence=edge_confidence,
         edge_coverage=edge_coverage,
         edge_valid_frame_count=valid_frame_count,
-        parameters={
-            "patch_length_s": float(patch_length_s),
-            "clock_start_s": float(clock_start_s),
-            "patch_count": int(len(social_step)),
-            "patch_count_source": "explicit" if patch_count is not None else "full_video_floor",
-            "minimum_movement_speed_px_s": float(minimum_movement_speed_px_s),
-            "patch_interval_convention": "[patch_start_s, patch_end_s)",
-            "incomplete_tail_policy": "drop_unless_patch_count_is_explicit",
-            "motion_boundary_policy": (
-                "Exclude each patch's first frame from velocity-derived traits because "
-                "backward velocity uses the preceding frame outside that patch"
-            ),
-        },
+        parameters=parameters,
     )
 
 
@@ -839,20 +884,42 @@ def run_edge_extraction(
     matched_mousegpt_csv: Path,
     output_dir: Path,
     output_stem: str,
-    patch_length_s: float,
+    patch_length_s: float | None = None,
+    clock_node_npz: Path | None = None,
     clock_start_s: float = 0.0,
     patch_count: int | None = None,
     minimum_movement_speed_px_s: float = 1.0,
     save_frame_level: bool = True,
 ) -> dict[str, Any]:
+    if (patch_length_s is None) == (clock_node_npz is None):
+        raise ValueError(
+            "Provide exactly one of patch_length_s or clock_node_npz"
+        )
+    if clock_node_npz is not None and patch_count is not None:
+        raise ValueError(
+            "patch_count cannot be combined with an authoritative clock_node_npz"
+        )
     inputs = load_frame_inputs(idtracker_csv, matched_mousegpt_csv)
-    result = extract_social_edges(
-        inputs,
-        patch_length_s=patch_length_s,
-        clock_start_s=clock_start_s,
-        patch_count=patch_count,
-        minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-    )
+    if clock_node_npz is not None:
+        social_step, patch_start_s, patch_end_s, clock_meta = load_node_clock(
+            clock_node_npz
+        )
+        result = extract_social_edges_on_clock(
+            inputs,
+            social_step=social_step,
+            patch_start_s=patch_start_s,
+            patch_end_s=patch_end_s,
+            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
+            clock_parameters=clock_meta,
+        )
+    else:
+        result = extract_social_edges(
+            inputs,
+            patch_length_s=float(patch_length_s),
+            clock_start_s=clock_start_s,
+            patch_count=patch_count,
+            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
+        )
     return write_edge_outputs(
         result,
         output_dir=output_dir,
@@ -865,23 +932,37 @@ def run_edge_extraction(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract eight confidence-aware social edge traits on a fixed clock."
+        description=(
+            "Extract eight confidence-aware social edge traits on an authoritative "
+            "node clock or a legacy fixed clock."
+        )
     )
     parser.add_argument("--idtracker-csv", required=True, type=Path)
     parser.add_argument("--matched-mousegpt-csv", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument("--output-stem", required=True)
-    parser.add_argument(
+    clock = parser.add_mutually_exclusive_group(required=True)
+    clock.add_argument(
         "--patch-length-s",
-        required=True,
         type=float,
-        help="Minimum upstream patch duration. Must equal the node-feature clock.",
+        help="Legacy fixed duration used only before a node clock exists.",
+    )
+    clock.add_argument(
+        "--clock-node-npz",
+        type=Path,
+        help=(
+            "Canonical node NPZ whose patch_start_s/patch_end_s arrays define "
+            "the authoritative edge aggregation intervals."
+        ),
     )
     parser.add_argument("--clock-start-s", type=float, default=0.0)
     parser.add_argument(
         "--patch-count",
         type=int,
-        help="Optional authoritative node timestep count; otherwise only full video patches are emitted.",
+        help=(
+            "Legacy fixed-clock timestep count; otherwise only full video patches "
+            "are emitted. Cannot be combined with --clock-node-npz."
+        ),
     )
     parser.add_argument("--minimum-movement-speed-px-s", type=float, default=1.0)
     parser.add_argument("--no-frame-level", action="store_true")
@@ -896,6 +977,7 @@ def main() -> int:
         output_dir=args.outdir,
         output_stem=args.output_stem,
         patch_length_s=args.patch_length_s,
+        clock_node_npz=args.clock_node_npz,
         clock_start_s=args.clock_start_s,
         patch_count=args.patch_count,
         minimum_movement_speed_px_s=args.minimum_movement_speed_px_s,

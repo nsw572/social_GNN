@@ -171,6 +171,34 @@ class VideoFeaturePipelineTest(unittest.TestCase):
         self.assertEqual(command[command.index("--patch-length-s") + 1], "0.125")
         self.assertEqual(command[command.index("--patch-count") + 1], "17")
 
+    def test_edge_command_prefers_authoritative_node_clock(self):
+        clock = Path("C:/nodes/sample_node_features.npz")
+        job = VideoJob(
+            "sample",
+            Path("C:/video.mp4"),
+            Path("C:/out/sample"),
+            social_patch_count=17,
+            node_clock_npz=clock,
+        )
+        config = {
+            "edge_extraction": {
+                "python": "C:/deepof/python.exe",
+                "script": "C:/repo/social_gnn/edge_extraction.py",
+                "patch_length_s": None,
+                "clock_start_s": 0.0,
+            }
+        }
+        command = build_edge_extraction_command(
+            config,
+            job,
+            idtracker_csv=Path("C:/out/id.csv"),
+            matched_mousegpt_csv=Path("C:/out/mouse.csv"),
+            output_dir=Path("C:/out/edges"),
+        )
+        self.assertEqual(command[command.index("--clock-node-npz") + 1], str(clock))
+        self.assertNotIn("--patch-length-s", command)
+        self.assertNotIn("--patch-count", command)
+
     @staticmethod
     def _mouse_row(frame, track, x, y):
         row = {"frame_id": frame, "track_id": track, "bbox_score": 0.95}
