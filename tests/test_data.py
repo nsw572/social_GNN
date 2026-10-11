@@ -14,7 +14,7 @@ from social_gnn.data import (
     collate_social_trials,
 )
 from social_gnn.graph_builder import compose_edge_inputs
-from social_gnn.models import SocialGNNWithTCN
+from social_gnn.models import SocialV0
 
 
 def make_package(trial_id: str, timesteps: int, *, node_dim: int = 4):
@@ -201,7 +201,7 @@ class SocialTrialDataTest(unittest.TestCase):
         self.assertEqual(batch["trial_id"], ["a", "b"])
         self.assertEqual(batch["sequence_length"].tolist(), [2, 4])
 
-    def test_padded_batch_feeds_graph_tcn_without_upstream_files(self):
+    def test_padded_batch_feeds_patch_gnn_without_upstream_files(self):
         dataset = SocialTrialDataset(
             [make_package("short_model", 3), make_package("long_model", 5)]
         )
@@ -211,24 +211,23 @@ class SocialTrialDataTest(unittest.TestCase):
         edge_features = compose_edge_inputs(
             batch["edge_values"], batch["edge_confidence"]
         )
-        model = SocialGNNWithTCN(
+        model = SocialV0(
             node_dim=4,
             edge_dim=16,
-            graph_hidden_dim=8,
-            temporal_hidden_dim=6,
-            tcn_levels=2,
-            tcn_dropout=0.0,
+            hidden_dim=8,
         ).eval()
         with torch.no_grad():
-            social_state = model(
+            graph_embedding = model(
                 batch["node_features"],
                 edge_features,
                 node_mask=batch["node_mask"],
-                time_mask=batch["time_mask"],
             )
-        self.assertEqual(tuple(social_state.shape), (2, 5, 6))
+        self.assertEqual(tuple(graph_embedding.shape), (2, 5, 8))
         self.assertTrue(
-            torch.equal(social_state[0, 3:], torch.zeros_like(social_state[0, 3:]))
+            torch.equal(
+                graph_embedding[0, 3:],
+                torch.zeros_like(graph_embedding[0, 3:]),
+            )
         )
 
 

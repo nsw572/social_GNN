@@ -12,6 +12,7 @@ from social_gnn.video_feature_pipeline import (
     build_edge_extraction_command,
     build_idtracker_command,
     build_idtracker_smoothing_command,
+    build_imu_identity_mapping_command,
     build_mousegpt_command,
     extract_reusable_idtracker_parameters,
     idtracker_manual_for_job,
@@ -35,6 +36,27 @@ class VideoFeaturePipelineTest(unittest.TestCase):
                 reusable_profile_exists=True,
                 force_recalibrate=False,
             )
+        )
+
+    def test_job_can_carry_a_per_video_idtracker_profile(self):
+        config = {
+            "output_root": "C:/out",
+            "videos": [
+                {
+                    "id": "trial",
+                    "path": "C:/video.mp4",
+                    "idtracker_parameters_file": "C:/params/trial.toml",
+                }
+            ],
+        }
+        from unittest.mock import patch
+
+        with patch.object(Path, "is_file", return_value=True):
+            from social_gnn.video_feature_pipeline import build_jobs
+
+            job = build_jobs(config)[0]
+        self.assertEqual(
+            job.idtracker_parameters_file, Path("C:/params/trial.toml")
         )
         self.assertTrue(
             idtracker_manual_for_job(
@@ -120,6 +142,25 @@ class VideoFeaturePipelineTest(unittest.TestCase):
         self.assertIn("--track", tracker)
         self.assertNotIn("`", "".join(mouse + tracker))
 
+    def test_mousegpt_can_skip_large_visualization_output(self):
+        job = VideoJob("sample", Path("C:/video.mp4"), Path("C:/out/sample"))
+        config = {
+            "mousegpt": {
+                "python": "C:/mouse/python.exe",
+                "inferencer_script": "C:/mouse/inferencer_demo.py",
+                "pose_config": "C:/mouse/pose.py",
+                "pose_weights": "C:/mouse/pose.pth",
+                "det_config": "C:/mouse/det.py",
+                "det_weights": "C:/mouse/det.pth",
+                "save_visualization": False,
+            }
+        }
+        command = build_mousegpt_command(
+            config, job, Path("C:/pred"), Path("C:/vis")
+        )
+        self.assertEqual(command[command.index("--vis-out-dir") + 1], "")
+        self.assertIn("--pred-out-dir", command)
+
     def test_smoothing_switch_selects_repaired_contract(self):
         job = VideoJob("sample", Path("C:/video.mp4"), Path("C:/out/sample"))
         config = {
@@ -146,30 +187,53 @@ class VideoFeaturePipelineTest(unittest.TestCase):
         self.assertIn("5.0", command)
         self.assertNotIn("`", "".join(command))
 
-    def test_edge_command_uses_fixed_unknown_patch_parameter(self):
+    def test_entry_mapping_becomes_active_idtracker_contract(self):
         job = VideoJob(
-            "sample",
+            "A4_B4",
             Path("C:/video.mp4"),
-            Path("C:/out/sample"),
-            social_patch_count=17,
+            Path("C:/out/A4_B4"),
+            imu_animals=(
+                {"label": "A4_1c", "csv": "C:/imu/a.csv", "entry_time_s": 19.9},
+                {"label": "B4_ab", "csv": "C:/imu/b.csv", "entry_time_s": 57.1},
+            ),
         )
+        config = {
+            "idtrackerai": {"smoothing": {"enabled": True}},
+            "imu_identity_mapping": {
+                "enabled": True,
+                "python": "C:/deepof/python.exe",
+                "script": "C:/repo/social_gnn/sequential_entry_identity.py",
+            },
+        }
+        active = active_idtracker_features_csv(config, job)
+        self.assertTrue(active.name.endswith("_idtracker_kinematics_canonical.csv"))
+        command = build_imu_identity_mapping_command(
+            config,
+            job,
+            idtracker_csv=Path("C:/out/A4_B4/raw_smoothed.csv"),
+            output_dir=Path("C:/out/A4_B4/imu_identity_mapping"),
+        )
+        self.assertIn("A4_1c=19.9", command)
+        self.assertIn("B4_ab=57.1", command)
+        self.assertIn("A4_1c=C:\\imu\\a.csv", command)
+        self.assertNotIn("`", "".join(command))
+
+    def test_edge_command_requires_authoritative_node_clock(self):
+        job = VideoJob("sample", Path("C:/video.mp4"), Path("C:/out/sample"))
         config = {
             "edge_extraction": {
                 "python": "C:/deepof/python.exe",
                 "script": "C:/repo/social_gnn/edge_extraction.py",
-                "patch_length_s": 0.125,
-                "clock_start_s": 0.0,
             }
         }
-        command = build_edge_extraction_command(
-            config,
-            job,
-            idtracker_csv=Path("C:/out/id.csv"),
-            matched_mousegpt_csv=Path("C:/out/mouse.csv"),
-            output_dir=Path("C:/out/edges"),
-        )
-        self.assertEqual(command[command.index("--patch-length-s") + 1], "0.125")
-        self.assertEqual(command[command.index("--patch-count") + 1], "17")
+        with self.assertRaisesRegex(ValueError, "no authoritative node clock"):
+            build_edge_extraction_command(
+                config,
+                job,
+                idtracker_csv=Path("C:/out/id.csv"),
+                matched_mousegpt_csv=Path("C:/out/mouse.csv"),
+                output_dir=Path("C:/out/edges"),
+            )
 
     def test_edge_command_prefers_authoritative_node_clock(self):
         clock = Path("C:/nodes/sample_node_features.npz")
@@ -177,15 +241,13 @@ class VideoFeaturePipelineTest(unittest.TestCase):
             "sample",
             Path("C:/video.mp4"),
             Path("C:/out/sample"),
-            social_patch_count=17,
             node_clock_npz=clock,
         )
         config = {
             "edge_extraction": {
                 "python": "C:/deepof/python.exe",
                 "script": "C:/repo/social_gnn/edge_extraction.py",
-                "patch_length_s": None,
-                "clock_start_s": 0.0,
+                "minimum_patch_displacement_px": 2.5,
             }
         }
         command = build_edge_extraction_command(
@@ -196,6 +258,9 @@ class VideoFeaturePipelineTest(unittest.TestCase):
             output_dir=Path("C:/out/edges"),
         )
         self.assertEqual(command[command.index("--clock-node-npz") + 1], str(clock))
+        self.assertEqual(
+            command[command.index("--minimum-patch-displacement-px") + 1], "2.5"
+        )
         self.assertNotIn("--patch-length-s", command)
         self.assertNotIn("--patch-count", command)
 

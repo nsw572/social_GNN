@@ -14,7 +14,7 @@ value = torch.randn(8, 100, 2, 2, 8)            # eight physical traits
 confidence = torch.rand(8, 100, 2, 2, 8)        # per-trait confidence
 coverage = torch.rand(8, 100, 2, 2, 8)          # separate QC tensor, not model input
 edges = compose_edge_inputs(value, confidence)  # 8 values + 8 confidences
-social_latent = model(h, edges)                 # [8, 100, 64]
+g_t = model(h, edges)                          # [8, 100, 64]
 ```
 
 The V0 implementation uses only PyTorch for message passing. This is
@@ -22,52 +22,86 @@ deliberate: PyTorch Geometric is not installed in the current interpreter.
 Once the input contract is validated on real data, the layer can be swapped
 for `GINEConv` without changing the dataset or downstream representation API.
 
-## Temporal social state
+## Patch-level representation
 
-`SocialGNNWithTCN` implements the currently available part of the intended
-training path:
-
-```text
-Graph sequence -> patch-wise GNN -> causal TCN -> s_t -> future SSL decoder
-```
-
-The GNN first produces an independent graph embedding `g_t` for every fixed
-social patch. A residual TCN then computes
+The trainable encoder deliberately stops at one independent graph embedding
+per fixed physical patch:
 
 ```text
-s_t = TCN(g_1, ..., g_t)
+fixed social patch -> node/edge features -> GNN -> g_t -> SSL head -> loss
 ```
 
-using left-only padding, so changing a future patch cannot change a past
-state. Dilations grow geometrically across TCN levels. Because each residual
-block contains two convolutions, its receptive field in patches is
+There is no TCN, RNN, Transformer, or other neural temporal encoder in this
+stage. Changing another patch cannot change `g_t`. After SSL training, export
+the valid `g_t` rows selected by `time_mask` for downstream clustering or a
+separate Markov-style model such as an HMM/HSMM.
 
-```text
-1 + 2 * (kernel_size - 1) * sum(dilations).
-```
+The current implemented SSL baseline is patch-local masked multimodal
+reconstruction. `masked_social_ssl.py` clones a DataLoader batch, masks node
+features or individual directed edge traits, and can drop a complete node or
+edge modality for a patch. The original batch remains the target. The GNN
+reconstructs hidden node latent values and eight hidden edge values; edge loss
+uses the stored per-trait confidence as a weight without multiplying it into
+the target value.
 
-The default four levels use dilations `(1, 2, 4, 8)` and kernel size `3`, for a
-61-patch receptive field. A `[B,T]` time mask supports padded trials; masked
-states are zeroed after every block and cannot inject values into later valid
-states.
+The parallel `vae.py` path is a patch-level VAE self-reconstruction baseline.
+It reconstructs all node and edge values and adds a configurable KL term. It
+also has no temporal encoder. The two objectives are separate experiments, not
+two losses that must be enabled together.
+
+Example:
 
 ```python
-from social_gnn import SocialGNNWithTCN
+from social_gnn import MaskedSocialSSL, SocialMaskConfig
+from social_gnn.masked_social_ssl import masked_social_reconstruction_loss
 
-encoder = SocialGNNWithTCN(
-    node_dim=128,
-    edge_dim=16,
-    graph_hidden_dim=64,
-    temporal_hidden_dim=64,
-    tcn_levels=4,
-)
-s_t = encoder(h, edges, node_mask=node_mask, time_mask=time_mask)
-# s_t: [batch, social_patches, 64]
+model = MaskedSocialSSL(node_dim=6, hidden_dim=64)
+output = model(batch, mask_config=SocialMaskConfig(node_mask_probability=0.15))
+loss = masked_social_reconstruction_loss(output, batch)["total"]
 ```
 
-The SSL decoder, prediction target, and loss are intentionally outside this
-module until the self-supervised objective is selected. They should consume
-`s_t` without changing the graph/temporal encoder contract.
+For an actual epoch, use `train_masked_social_ssl_epoch` or the independent
+`train_social_patch_vae_epoch` helper with the existing full-trial DataLoader.
+The DataLoader still shuffles only whole trials; no helper concatenates time
+across trial boundaries.
+
+## Reproducible experiment runner
+
+`experiment.py` is the canonical training entry point. It loads every
+node/edge pair through `SocialTrialPackage`, rejects clock or identity
+mismatches and node files marked `training_eligible=false`, and fits all
+normalization statistics on training trials only. Node channels use valid-node
+means and variances. Edge trait statistics use confidence-weighted valid
+directed edges; confidence itself stays in `[0,1]` and is never standardized.
+
+The mature five-trial configuration is
+`configs/social_gnn_experiment_6dim_v0.yaml`. Before all edge files exist, a
+single complete trial can exercise every model and output path without
+claiming a valid held-out result:
+
+```powershell
+python -m social_gnn.experiment `
+  --config configs\social_gnn_experiment_6dim_v0.yaml `
+  --smoke-test `
+  --device cuda:1
+```
+
+Once every configured trial is complete, omit `--smoke-test` for the strict
+formal run:
+
+```powershell
+python -m social_gnn.experiment `
+  --config configs\social_gnn_experiment_6dim_v0.yaml
+```
+
+The default experiment compares masked SSL with full edges, node-only input,
+and edges shuffled over time within each trial, plus an independent full-edge
+patch VAE. The three masked runs start from identical weights and use identical
+mask schedules, so their edge condition is the intended difference. Outputs
+go to a new timestamped directory and include train-only normalization
+statistics, per-epoch JSONL metrics, best/last checkpoints, and one
+clock-preserving `g_t` NPZ per trial and split. No run overwrites source files
+or shuffles data across trial boundaries.
 
 ## Full-trial data loading
 
@@ -87,6 +121,38 @@ Exact duplicate latent streams are rejected as a likely upstream recombination
 failure. `--allow-duplicate-nodes` exists only for interface tests; its output
 is marked `training_eligible=false`.
 
+For the mature per-animal 6D files (`downstream [S,6]`, `time [S]`, and
+`interp_mask [S]`), use the separate fixed-clock converter. It assigns latent
+timestamps to half-open 0.16 s patches and computes one validity-weighted mean
+per animal and patch. At 25 Hz this normally pools four latent vectors into one
+node vector. The approximately one-second receptive field used to produce each
+upstream latent does not change the Social-GNN patch duration; it only means
+adjacent node observations are not statistically independent.
+
+```powershell
+python -m social_gnn.latent_node_converter `
+  --trial-id A4_B4 `
+  --animal 'A4_1c=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_A4-1c_latent.npz' `
+  --animal 'B4_ab=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_B4-ab_latent.npz' `
+  --output-identity 1 2 `
+  --output-node-npz D:\social_trials\A4_B4\node_features.npz
+```
+
+By default non-interpolated samples have weight 1, interpolated samples have
+weight 0, and a node remains valid when at least half of the expected sample
+weight is present. `--interpolated-weight` and
+`--minimum-weight-coverage` make both choices explicit. The node NPZ stores
+`node_weight_coverage`, `node_interp_fraction`, and `node_sample_count` as QC
+arrays; padding is still performed only later by the DataLoader. Optional
+`--clock-start-s`/`--clock-end-s` bounds can restrict conversion to the strict
+video/IMU overlap without changing the 0.16 s grid.
+
+The converter permits only sub-microsecond-scale floating timestamp jitter and
+extra samples confined to stream boundaries. It trims those boundary extras,
+records the dropped counts in the summary, and uses the mean timestamp as the
+shared clock. Internal gaps or timestamp offsets above the derived tolerance
+raise an error instead of being silently aligned.
+
 `SocialTrialPackage` represents one complete trial. It validates all arrays
 before exposing them to PyTorch and raises `SocialTrialValidationError` with
 the trial ID when node/edge clocks, identity order, shapes, finite values, or
@@ -98,7 +164,7 @@ lazily by the Dataset worker instead of loading every trial into RAM:
 ```python
 import torch
 from social_gnn import (
-    SocialGNNWithTCN,
+    SocialV0,
     SocialTrialDataset,
     SocialTrialSource,
     build_social_dataloader,
@@ -120,17 +186,17 @@ sources = [
 dataset = SocialTrialDataset(sources)
 loader = build_social_dataloader(dataset, batch_size=2, shuffle=True)
 
-model = SocialGNNWithTCN(node_dim=128, edge_dim=16)
+model = SocialV0(node_dim=128, edge_dim=16, hidden_dim=64)
 for batch in loader:
     edge_features = compose_edge_inputs(
         batch["edge_values"], batch["edge_confidence"]
     )
-    s_t = model(
+    g_t = model(
         batch["node_features"],
         edge_features,
         node_mask=batch["node_mask"],
-        time_mask=batch["time_mask"],
     )
+    valid_g_t = g_t[batch["time_mask"]]
 ```
 
 One Dataset item always equals one full trial. The collate function pads only
@@ -140,10 +206,12 @@ therefore changes only trial order. All padded tensor values and masks are zero,
 while `sequence_length`, `identity`, and `trial_id` preserve batch metadata.
 
 The node NPZ must contain `node_features`, `node_mask`, `patch_start_s`,
-`patch_end_s`, and `identity`. The edge NPZ may use canonical `edge_values` and
-`edge_confidence` keys or the existing extractor keys `edge_value_dense` and
-`edge_confidence_dense`; it must also contain the same timestamps and identity
-order.
+`patch_end_s`, and `identity`. The edge NPZ may use canonical dense
+`edge_values` and `edge_confidence` keys or the existing extractor keys
+`edge_value_dense` and `edge_confidence_dense`; it must also contain the same
+timestamps and identity order. When an extractor file contains both sparse
+`edge_confidence [T,E,8]` and `edge_confidence_dense [T,N,N,8]`, the loader
+explicitly selects the dense tensor.
 
 Every Dataset access returns newly allocated tensors. Future SSL code should
 keep the returned batch as the unmodified target and create masked/augmented
@@ -236,13 +304,90 @@ identity_matching:
     enabled: false
 ```
 
+`imu_video_identity.py` provides separate, diagnostic evidence for the
+remaining IMU-to-video identity mapping problem. It can estimate a
+gravity-orthogonal acceleration signature, compare it to trajectory
+acceleration signatures under all one-to-one permutations, and map identities
+by the ordering of well-separated entry events. The acceleration estimate is
+not a world-coordinate horizontal acceleration without orientation data, and
+entry-order evidence must be validated visually before it is used to create a
+canonical identity manifest. Neither evidence source automatically rewrites
+idtracker.ai identities.
+
+## Sequential-entry identity anchoring
+
+`sequential_entry_identity.py` turns a visually validated sequential-entry
+protocol into an auditable identity permutation. For two animals, it detects
+or accepts the two IMU impact times, removes configurable margins around both
+entries, and inspects the idtracker.ai kinematics rows in the remaining
+single-animal interval. The earlier IMU animal becomes canonical animal 1 only
+when one original idtracker identity dominates that interval. Minimum window
+duration, single-identity frame fraction, selected-ID coverage, competing-ID
+coverage, and coverage margin are all fail-closed gates.
+The full interval must be present with both identity rows per frame (missing
+centroids remain invalid rows). Occupancy here means finite, valid centroid
+tracks, not an independent segmentation/blob-count measurement. The arena ROI
+must exclude handlers and reflections; inspect the anchor when segmentation
+quality is uncertain.
+
+The original idtracker.ai session and IDs are never edited. Outputs are a new
+canonical kinematics CSV, a two-row mapping CSV, and a JSON evidence manifest.
+The canonical CSV retains `source_idtracker_identity` and adds
+`canonical_identity_label` plus the mapping quality score. When this stage is
+enabled, MouseGPT matching and edge extraction automatically consume that
+canonical CSV.
+Canonical numeric labels are `[1, 2]` in entry order. The JSON also records
+`canonical_label_order` with the corresponding IMU labels. When converting
+nodes, order the actual upstream mouse streams accordingly before assigning
+`--output-identity 1 2`; changing labels alone does not reorder latent streams.
+Existing node files are not silently relabeled by this stage.
+
+Configure each trial independently because IMU paths and animal labels differ:
+
+```yaml
+videos:
+  - id: A4_B4
+    path: 'Y:\path\to\topview.mp4'
+    imu_animals:
+      - label: A4_1c
+        csv: 'Y:\path\to\A4_B4_A4-1c.csv'
+        entry_time_s: 19.923811  # optional visually confirmed override
+      - label: B4_ab
+        csv: 'Y:\path\to\A4_B4_B4-ab.csv'
+        entry_time_s: 57.083811
+
+imu_identity_mapping:
+  enabled: true
+```
+
+If `entry_time_s` is omitted, the mapper selects the strongest
+gravity-compensated acceleration impulse inside the configured early search
+window. Manual times are preferable after the synchronized viewer has made the
+entry events unambiguous. Ambiguous idtracker windows raise
+`SequentialEntryIdentityError`; they are never silently assigned.
+
+Run just this CPU stage against an existing kinematics export:
+
+```powershell
+python social_gnn\sequential_entry_identity.py `
+  --idtracker-csv D:\trial\A4_B4_idtracker_kinematics.csv `
+  --animal 'A4_1c=Y:\WSB\Computational_Ethology\processed_Data\Test\A4_B4_A4-1c.csv' `
+  --animal 'B4_ab=Y:\WSB\Computational_Ethology\processed_Data\Test\A4_B4_B4-ab.csv' `
+  --entry-time A4_1c=19.923811 --entry-time B4_ab=57.083811 `
+  --outdir D:\trial\imu_identity_mapping --output-stem A4_B4
+```
+
+With the default margins this uses `[21.923811, 54.083811)` seconds. Remove
+both `--entry-time` options to test automatic peak selection. Output confidence
+is an anchor quality score, not a calibrated probability or a guarantee that
+every later tracking frame has the correct identity.
+
 ## Authoritative-clock edge extraction
 
-`edge_extraction.py` computes eight directed frame-level relations and then
-aggregates them into the exact physical intervals stored by the node NPZ. This
-is important for upstream clocks whose patch duration and stride differ, such
-as 0.32 s patches emitted every 0.16 s. Overlapping intervals are aggregated
-independently; they are not rewritten into contiguous bins.
+`edge_extraction.py` uses the one fixed patch grid stored by the node NPZ. A
+grid may overlap (for example, 0.32 s duration and 0.16 s stride), but duration
+and stride must each remain constant throughout a trial. Variable/mixed patch
+granularity and an independently generated video clock are rejected.
 
 Frames are assigned to half-open intervals `[patch_start_s, patch_end_s)`. The
 stored contract keeps three arrays separate:
@@ -253,13 +398,28 @@ edge_confidence  [patches, directed_edges, 8]
 edge_coverage    [patches, directed_edges, 8]
 ```
 
-Patch values are confidence-weighted means. Patch confidence is the sum of
-valid frame confidences divided by all video frames in the patch, and coverage
-is the valid-frame fraction. Missing traits have value/confidence/coverage zero;
-the physical value is never multiplied by confidence in the saved contract.
-Because patch confidence already includes coverage, the default GNN input is
-the 16-channel concatenation `[edge_value, edge_confidence]`. The separately
-stored coverage tensor is a QC/ablation signal and is not duplicated in V0.
+The five state-like traits (three distances, source-facing-target, and head
+alignment) use confidence-weighted frame means. Patch confidence is kept as a
+separate channel and includes valid-frame coverage.
+
+The three dynamic traits are not averages of frame velocities. Stable
+patch-level centroid summaries are built first, then `t -> t+1` finite
+differences use
+
+```text
+dt = patch_center_s[t+1] - patch_center_s[t]
+```
+
+to derive directional source approach speed, symmetric pair closing speed, and
+movement-direction alignment. The final patch has no forward transition, so
+its dynamic value/confidence/coverage channels are zero. Low displacement
+downweights movement-alignment confidence using the configured pixel noise
+floor. Missing traits remain zero-confidence; values are never permanently
+multiplied by confidence.
+
+The default GNN input remains the 16-channel concatenation
+`[edge_value, edge_confidence]`. Coverage and patch centroid summaries are QC
+outputs rather than additional V0 model inputs.
 
 Configure each video with its corresponding canonical node clock:
 
@@ -272,10 +432,10 @@ videos:
 edge_extraction:
   enabled: true
   clock_node_npz: null
-  patch_length_s: null
+  minimum_patch_displacement_px: 1.0
 ```
 
-`edge_extraction.clock_node_npz` is an optional global fallback. The old
-`patch_length_s` plus `social_patch_count` mode remains available only for
-development before an upstream node clock exists. `SocialTrialPackage.from_npz`
-then verifies exact node/edge identity and patch-time equality before training.
+`edge_extraction.clock_node_npz` is an optional global fallback when all videos
+share one clock file. There is no legacy `patch_length_s` mode.
+`SocialTrialPackage.from_npz` verifies fixed-grid validity and exact node/edge
+identity and patch-time equality before training.

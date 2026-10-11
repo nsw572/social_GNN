@@ -16,6 +16,9 @@
 *.npz
 *.pkl
 *.pickle
+*.pt
+*.pth
+*.ckpt
 *.csv
 *.json
 *.html

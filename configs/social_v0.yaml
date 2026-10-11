@@ -1,19 +1,28 @@
 version: social_v0
 model: gine
-node_dim: 128  # dimension of continuous IMU latent h_i^t
+node_dim: 6    # selected upstream 6dim continuous IMU latent h_i^t
 edge_dim: 16   # 8 values + 8 coverage-aware per-trait confidences
 hidden_dim: 64
 layers: 2
 graph: complete_directed
 self_loops: false
 single_animal: bypass
-temporal:
-  model: causal_tcn
-  hidden_dim: 64       # dimension of social state s_t
-  levels: 4
-  kernel_size: 3
-  dilation_base: 2
-  dropout: 0.1
+embedding:
+  name: g_t
+  temporal_encoder: none
+  export_for_downstream: true
 downstream:
-  clustering: kmeans
-  n_clusters: 8
+  examples: [clustering, hmm, hsmm]
+  train_with_gnn: false
+ssl:
+  type: masked_multimodal_reconstruction
+  node_mask_probability: 0.15
+  edge_mask_probability: 0.15
+  node_modality_dropout: 0.05
+  edge_modality_dropout: 0.05
+  node_loss_weight: 1.0
+  edge_loss_weight: 1.0
+parallel_vae:
+  enabled: false
+  latent_dim: 32
+  kl_beta: 0.001

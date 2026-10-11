@@ -1,0 +1,156 @@
+version: video_feature_pipeline_6dim_v0
+
+# Mature five-trial run. Canonical identity 1 is the earlier entrant and
+# identity 2 the later entrant. The node NPZs were generated from the same
+# sequential-entry evidence used below to canonicalize idtracker.ai output.
+videos:
+  - id: A1_C1
+    path: 'Y:\WSB\Computational_Ethology\Data\8.25_social_all_paired\A1_C1_C1-1c\data1.mp4'
+    node_clock_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A1_C1_node_features.npz'
+    idtracker_parameters_file: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\idtracker_parameters\A1_C1.toml'
+    imu_animals:
+      - {label: A1-6d, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A1_C1_A1-6d.csv'}
+      - {label: C1-1c, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A1_C1_C1-1c.csv'}
+
+  - id: A3_C3
+    path: 'Y:\WSB\Computational_Ethology\Data\8.25_social_all_paired\A3_C3_C3_1c\data1.mp4'
+    node_clock_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A3_C3_node_features.npz'
+    idtracker_parameters_file: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\idtracker_parameters\A3_C3.toml'
+    imu_animals:
+      - {label: A3-6d, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A3_C3_A3-6d.csv'}
+      - {label: C3-1c, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A3_C3_C3-1c.csv'}
+
+  - id: A4_B4
+    path: 'Y:\WSB\Computational_Ethology\Data\8.25_social_all_paired\A4_B4_A4-1c\data1.mp4'
+    node_clock_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A4_B4_node_features.npz'
+    idtracker_parameters_file: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\idtracker_parameters\A4_B4.toml'
+    imu_animals:
+      - {label: A4-1c, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A4_B4_A4-1c.csv'}
+      - {label: B4-ab, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A4_B4_B4-ab.csv'}
+
+  - id: A4_C4
+    path: 'Y:\WSB\Computational_Ethology\Data\8.25_social_all_paired\A4_C4_C4-c8\data1.mp4'
+    node_clock_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A4_C4_node_features.npz'
+    idtracker_parameters_file: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\idtracker_parameters\A4_C4.toml'
+    imu_animals:
+      - {label: A4-6d, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A4_C4_A4-6d.csv'}
+      - {label: C4-c8, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A4_C4_C4-c8.csv'}
+
+  - id: A5_C5
+    path: 'Y:\WSB\Computational_Ethology\Data\8.25_social_all_paired\A5_C5_C5-c8\data1.mp4'
+    node_clock_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A5_C5_node_features.npz'
+    idtracker_parameters_file: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\idtracker_parameters\A5_C5.toml'
+    imu_animals:
+      - {label: A5-6d, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A5_C5_A5-6d.csv'}
+      - {label: C5-c8, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A5_C5_C5-c8.csv'}
+
+output_root: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\video_features'
+
+pipeline:
+  parallel_branches: true
+  resume: true
+  fail_fast: true
+  dry_run: false
+
+mousegpt:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\mmpose310\python.exe'
+  workdir: 'C:\Users\DELL\MouseGPT_code_submit\1_keypoints\demo'
+  inferencer_script: 'C:\Users\DELL\MouseGPT_code_submit\1_keypoints\demo\inferencer_demo.py'
+  pose_config: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\pose_config.py'
+  pose_weights: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\pose_weights.pth'
+  det_config: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\yolo_config.py'
+  det_weights: 'C:\Users\DELL\MouseGPT_code_submit\model_weights_config\yolo_weights.pth'
+  device: 'cuda:0'
+  draw_bbox: false
+  save_visualization: false
+  bbox_threshold: 0.6
+  nms_threshold: 0.1
+  keypoint_threshold: 0.3
+  extra_args: []
+  postprocess:
+    enabled: true
+    python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+    script: 'C:\Users\DELL\Desktop\deepOF\roughanalysis\mousegpt_head_direction_segments.py'
+    score_threshold: 0.3
+    max_match_distance: 700.0
+    max_track_gap_frames: 30
+    max_tracks: 2
+    skip_videos: true
+    extra_args: []
+
+idtrackerai:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\idtrackerai\python.exe'
+  source_dir: 'C:\Users\DELL\Desktop\deepOF\idtrackerai_editable'
+  gui_policy: never
+  force_recalibrate: false
+  reusable_parameters_file: 'C:\Users\DELL\Desktop\video_edge_inputs_v0\_idtrackerai\reusable_parameters.toml'
+  bootstrap_parameters_file: null
+  number_of_animals: 2
+  trajectories_formats: [npy, csv_tidy]
+  data_policy: all
+  device: 'cuda:1'
+  number_of_parallel_workers: 0
+  extra_args: []
+  export:
+    enabled: true
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\idtracker_export.py'
+    velocity_method: backward
+  smoothing:
+    enabled: false
+    python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\idtracker_identity_smoothing.py'
+    speed_multiplier: 5.0
+    robust_mean_upper_quantile: 0.99
+    minimum_speed_similarity_ratio: 0.80
+    maximum_displacement_cosine: -0.80
+    contact_distance_body_lengths: 0.35
+    contact_window_frames: 2
+    max_seed_gap_frames: 2
+    identity_contact_distance_body_lengths: 0.20
+    maximum_cross_identity_endpoint_ratio: 0.25
+    maximum_swap_pair_gap_seconds: 5.0
+    transition_speed_cap_multiplier: 5.0
+    maximum_transition_expansion_seconds: 1.0
+    interpolation_confidence: 0.05
+
+imu_identity_mapping:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\sequential_entry_identity.py'
+  entry_search_start_s: 0.0
+  entry_search_end_s: 120.0
+  gravity_window_s: 0.8
+  threshold_z: 6.0
+  # Entry is a sharp drop event, so only exclude the immediate transition.
+  # Identity quality is guarded below by frame-level coverage checks.
+  after_first_entry_margin_s: 0.5
+  before_second_entry_margin_s: 0.5
+  minimum_anchor_duration_s: 1.0
+  minimum_anchor_frames: 10
+  minimum_single_identity_fraction: 0.80
+  minimum_selected_coverage: 0.80
+  maximum_competing_coverage: 0.20
+  minimum_coverage_margin: 0.60
+
+identity_matching:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\identity_matching.py'
+  max_distance_px: 200.0
+  min_assignment_margin_px: 100.0
+  distance_confidence_scale_px: 100.0
+  margin_confidence_scale_px: 300.0
+  min_anchor_confidence: 0.30
+  visualization:
+    enabled: false
+    script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\identity_match_visualization.py'
+
+edge_extraction:
+  enabled: true
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\edge_extraction.py'
+  clock_node_npz: null
+  minimum_patch_displacement_px: 1.0
+  save_frame_level: false

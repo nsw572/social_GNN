@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from .authoritative_clock import validate_fixed_patch_grid
+
 
 class SocialTrialValidationError(ValueError):
     """Raised when one trial violates the Social-GNN data contract."""
@@ -160,6 +162,14 @@ class SocialTrialPackage:
         if timesteps > 1 and np.any(np.diff(patch_end_s) <= 0):
             index = int(np.argwhere(np.diff(patch_end_s) <= 0)[0, 0] + 1)
             _fail(trial_id, f"patch_end_s must be strictly increasing at index {index}")
+        try:
+            validate_fixed_patch_grid(
+                patch_start_s,
+                patch_end_s,
+                label=f"Trial {trial_id!r} clock",
+            )
+        except ValueError as exc:
+            raise SocialTrialValidationError(str(exc)) from exc
 
         object.__setattr__(self, "node_features", node_features)
         object.__setattr__(self, "node_mask", node_mask)
@@ -250,16 +260,18 @@ class SocialTrialPackage:
                     node_mask=_required_array(
                         node_pack, "node_mask", resolved_id, node_path
                     ),
-                    edge_values=_array_alias(
+                    edge_values=_dense_edge_array(
                         edge_pack,
-                        ("edge_values", "edge_value_dense"),
+                        "edge_values",
+                        "edge_value_dense",
                         "edge_values",
                         resolved_id,
                         edge_path,
                     ),
-                    edge_confidence=_array_alias(
+                    edge_confidence=_dense_edge_array(
                         edge_pack,
-                        ("edge_confidence", "edge_confidence_dense"),
+                        "edge_confidence",
+                        "edge_confidence_dense",
                         "edge_confidence",
                         resolved_id,
                         edge_path,
@@ -347,6 +359,53 @@ def _array_alias(
             trial_id, f"duplicate {canonical_name} arrays", first, other
         )
     return first
+
+
+def _dense_edge_array(
+    pack: np.lib.npyio.NpzFile,
+    canonical_key: str,
+    dense_key: str,
+    canonical_name: str,
+    trial_id: str,
+    path: Path,
+) -> np.ndarray:
+    """Prefer the extractor's explicit dense edge tensor.
+
+    The extractor also writes ``edge_confidence [T,E,8]`` for its sparse edge
+    table. That historical key collides with the canonical dense-package name,
+    while ``edge_confidence_dense [T,N,N,8]`` is unambiguous. If both are
+    present, a 3-D canonical array is treated as the documented sparse export;
+    two dense aliases must still match exactly.
+    """
+
+    if dense_key in pack.files:
+        dense = np.asarray(pack[dense_key])
+        if canonical_key in pack.files:
+            alias = np.asarray(pack[canonical_key])
+            if alias.shape == dense.shape:
+                _require_exact_alignment(
+                    trial_id, f"duplicate {canonical_name} arrays", dense, alias
+                )
+            elif not (
+                alias.ndim == 3
+                and dense.ndim == 4
+                and alias.shape[0] == dense.shape[0]
+                and alias.shape[-1] == dense.shape[-1]
+            ):
+                _fail(
+                    trial_id,
+                    f"{path.name} has incompatible {canonical_key!r} shape "
+                    f"{alias.shape} beside {dense_key!r} shape {dense.shape}",
+                )
+        return dense
+    if canonical_key in pack.files:
+        return np.asarray(pack[canonical_key])
+    _fail(
+        trial_id,
+        f"{path.name} is missing {canonical_name!r}; accepted keys are "
+        f"({canonical_key!r}, {dense_key!r})",
+    )
+    raise AssertionError("unreachable")
 
 
 def _require_exact_alignment(

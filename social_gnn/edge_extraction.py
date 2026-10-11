@@ -1,9 +1,8 @@
 """Build confidence-aware social edge features from aligned video outputs.
 
 Inputs are the frame-aligned idtracker.ai kinematics CSV and the MouseGPT table
-already matched to idtracker.ai identities.  Prefer an authoritative node NPZ
-clock; the legacy fixed ``patch_length_s`` clock remains available for cases
-where upstream node data has not arrived yet.
+already matched to idtracker.ai identities. Every output graph uses one interval
+from the authoritative node NPZ clock.
 """
 
 from __future__ import annotations
@@ -20,9 +19,9 @@ import numpy as np
 import pandas as pd
 
 try:  # Support both ``python -m social_gnn...`` and direct script execution.
-    from .authoritative_clock import load_node_clock
+    from .authoritative_clock import load_node_clock, validate_fixed_patch_grid
 except ImportError:  # pragma: no cover - exercised by Windows pipeline execution
-    from authoritative_clock import load_node_clock
+    from authoritative_clock import load_node_clock, validate_fixed_patch_grid
 
 
 TRAIT_NAMES = (
@@ -47,6 +46,7 @@ TRAIT_UNITS = (
     "unitless",
 )
 
+STATE_TRAIT_INDICES = (0, 1, 2, 3, 4)
 DYNAMIC_TRAIT_INDICES = (5, 6, 7)
 
 
@@ -77,7 +77,12 @@ class EdgeExtractionResult:
     social_step: np.ndarray
     patch_start_s: np.ndarray
     patch_end_s: np.ndarray
+    patch_center_s: np.ndarray
+    patch_delta_t_s: np.ndarray
     patch_frame_count: np.ndarray
+    patch_centroid_px: np.ndarray
+    patch_centroid_confidence: np.ndarray
+    patch_centroid_coverage: np.ndarray
     edge_value: np.ndarray
     edge_confidence: np.ndarray
     edge_coverage: np.ndarray
@@ -356,12 +361,12 @@ def complete_directed_edges(identities: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 def compute_frame_edge_traits(
     inputs: FrameInputs,
-    *,
-    minimum_movement_speed_px_s: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute eight values and dependency-derived confidence per directed edge."""
-    if minimum_movement_speed_px_s < 0:
-        raise ValueError("minimum_movement_speed_px_s must be non-negative")
+    """Compute the five state-like traits at frame resolution.
+
+    Dynamic trait channels remain zero here and are derived only after stable
+    patch-level centroid aggregation.
+    """
     edge_index, edge_identity = complete_directed_edges(inputs.identities)
     n_frames, n_edges = len(inputs.frame_ids), edge_index.shape[1]
     values = np.zeros((n_frames, n_edges, len(TRAIT_NAMES)), dtype=np.float32)
@@ -459,110 +464,7 @@ def compute_frame_edge_traits(
             q_head_source[head_alignment_valid], q_head_target[head_alignment_valid]
         )
 
-        velocity_source = inputs.velocity_px_s[:, source]
-        velocity_target = inputs.velocity_px_s[:, target]
-        q_velocity_source = inputs.velocity_confidence[:, source]
-        q_velocity_target = inputs.velocity_confidence[:, target]
-        source_motion_valid = (
-            pair_valid
-            & np.isfinite(velocity_source).all(axis=1)
-            & (q_velocity_source > 0)
-        )
-        values[source_motion_valid, edge_number, 5] = np.einsum(
-            "ij,ij->i",
-            velocity_source[source_motion_valid],
-            pair_direction[source_motion_valid],
-        )
-        confidence[source_motion_valid, edge_number, 5] = np.minimum.reduce(
-            [
-                q_velocity_source[source_motion_valid],
-                q_p_source[source_motion_valid],
-                q_p_target[source_motion_valid],
-            ]
-        )
-
-        pair_motion_valid = (
-            source_motion_valid
-            & np.isfinite(velocity_target).all(axis=1)
-            & (q_velocity_target > 0)
-        )
-        values[pair_motion_valid, edge_number, 6] = -np.einsum(
-            "ij,ij->i",
-            velocity_target[pair_motion_valid] - velocity_source[pair_motion_valid],
-            pair_direction[pair_motion_valid],
-        )
-        confidence[pair_motion_valid, edge_number, 6] = np.minimum.reduce(
-            [
-                q_velocity_source[pair_motion_valid],
-                q_velocity_target[pair_motion_valid],
-                q_p_source[pair_motion_valid],
-                q_p_target[pair_motion_valid],
-            ]
-        )
-
-        source_speed = np.linalg.norm(velocity_source, axis=1)
-        target_speed = np.linalg.norm(velocity_target, axis=1)
-        movement_alignment_valid = (
-            np.isfinite(velocity_source).all(axis=1)
-            & np.isfinite(velocity_target).all(axis=1)
-            & (source_speed >= minimum_movement_speed_px_s)
-            & (target_speed >= minimum_movement_speed_px_s)
-            & (q_velocity_source > 0)
-            & (q_velocity_target > 0)
-        )
-        values[movement_alignment_valid, edge_number, 7] = np.clip(
-            np.einsum(
-                "ij,ij->i",
-                velocity_source[movement_alignment_valid]
-                / source_speed[movement_alignment_valid, None],
-                velocity_target[movement_alignment_valid]
-                / target_speed[movement_alignment_valid, None],
-            ),
-            -1.0,
-            1.0,
-        )
-        confidence[movement_alignment_valid, edge_number, 7] = np.minimum(
-            q_velocity_source[movement_alignment_valid],
-            q_velocity_target[movement_alignment_valid],
-        )
     return edge_index, edge_identity, values, confidence
-
-
-def build_fixed_social_clock(
-    frame_time_s: np.ndarray,
-    *,
-    patch_length_s: float,
-    clock_start_s: float = 0.0,
-    patch_count: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate fixed, contiguous ``[start, end)`` social patches."""
-    if not np.isfinite(patch_length_s) or patch_length_s <= 0:
-        raise ValueError("patch_length_s must be a positive finite value")
-    if not np.isfinite(clock_start_s):
-        raise ValueError("clock_start_s must be finite")
-    if patch_count is not None and patch_count < 1:
-        raise ValueError("patch_count must be >= 1")
-    times = np.asarray(frame_time_s, dtype=float)
-    if times.ndim != 1 or not len(times) or not np.isfinite(times).all():
-        raise ValueError("frame_time_s must be a non-empty finite vector")
-
-    if patch_count is None:
-        intervals = np.diff(times)
-        positive = intervals[np.isfinite(intervals) & (intervals > 0)]
-        frame_period = float(np.median(positive)) if positive.size else 0.0
-        video_end_s = float(times[-1] + frame_period)
-        available = video_end_s - clock_start_s
-        patch_count = int(math.floor((available + 1e-12) / patch_length_s))
-        if patch_count < 1:
-            raise ValueError(
-                "Video does not contain one complete social patch; provide an explicit "
-                "patch_count only if the node clock intentionally includes empty/padded bins"
-            )
-
-    social_step = np.arange(patch_count, dtype=np.int64)
-    patch_start_s = clock_start_s + social_step.astype(float) * patch_length_s
-    patch_end_s = patch_start_s + patch_length_s
-    return social_step, patch_start_s, patch_end_s
 
 
 def aggregate_fixed_patches(
@@ -577,8 +479,8 @@ def aggregate_fixed_patches(
 
     Patch confidence is ``sum(frame confidence) / number of frames in patch``.
     Equivalently it is valid-frame coverage times mean confidence on valid frames.
-    Motion values at a patch's first frame are excluded because their backward
-    difference uses a position outside the patch.
+    This function is used for state-like traits. Dynamic channels are computed
+    later from adjacent patch summaries and are not frame-averaged.
     """
     times = np.asarray(frame_time_s, dtype=float)
     values = np.asarray(frame_edge_value, dtype=float)
@@ -601,8 +503,7 @@ def aggregate_fixed_patches(
         if count <= 0:
             continue
         local_values = values[start:end]
-        local_confidence = confidence[start:end].copy()
-        local_confidence[0, :, DYNAMIC_TRAIT_INDICES] = 0.0
+        local_confidence = confidence[start:end]
         for edge in range(n_edges):
             for trait in range(n_traits):
                 q = local_confidence[:, edge, trait]
@@ -629,36 +530,192 @@ def aggregate_fixed_patches(
     )
 
 
-def extract_social_edges(
-    inputs: FrameInputs,
+def aggregate_patch_centroids(
     *,
-    patch_length_s: float,
-    clock_start_s: float = 0.0,
-    patch_count: int | None = None,
-    minimum_movement_speed_px_s: float = 1.0,
-) -> EdgeExtractionResult:
-    social_step, patch_start_s, patch_end_s = build_fixed_social_clock(
-        inputs.frame_time_s,
-        patch_length_s=patch_length_s,
-        clock_start_s=clock_start_s,
-        patch_count=patch_count,
+    frame_time_s: np.ndarray,
+    position_px: np.ndarray,
+    position_confidence: np.ndarray,
+    patch_start_s: np.ndarray,
+    patch_end_s: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build stable confidence-weighted centroid summaries for every patch."""
+    times = np.asarray(frame_time_s, dtype=float)
+    positions = np.asarray(position_px, dtype=float)
+    confidence = np.asarray(position_confidence, dtype=float)
+    if positions.ndim != 3 or positions.shape[-1] != 2:
+        raise ValueError("position_px must have shape [F,N,2]")
+    if confidence.shape != positions.shape[:2] or len(times) != len(positions):
+        raise ValueError("position arrays and frame_time_s are not aligned")
+
+    n_patches = len(patch_start_s)
+    n_animals = positions.shape[1]
+    patch_frame_count = np.zeros(n_patches, dtype=np.int32)
+    centroid = np.zeros((n_patches, n_animals, 2), dtype=np.float32)
+    centroid_confidence = np.zeros((n_patches, n_animals), dtype=np.float32)
+    centroid_coverage = np.zeros_like(centroid_confidence)
+    centroid_valid_count = np.zeros((n_patches, n_animals), dtype=np.int32)
+
+    for patch in range(n_patches):
+        start = int(np.searchsorted(times, patch_start_s[patch], side="left"))
+        end = int(np.searchsorted(times, patch_end_s[patch], side="left"))
+        count = end - start
+        patch_frame_count[patch] = count
+        if count <= 0:
+            continue
+        for animal in range(n_animals):
+            q = confidence[start:end, animal]
+            points = positions[start:end, animal]
+            valid = np.isfinite(points).all(axis=1) & np.isfinite(q) & (q > 0)
+            valid_count = int(valid.sum())
+            centroid_valid_count[patch, animal] = valid_count
+            centroid_coverage[patch, animal] = valid_count / count
+            if not valid_count:
+                continue
+            weight_sum = float(q[valid].sum())
+            if weight_sum <= 0:
+                continue
+            centroid[patch, animal] = np.average(
+                points[valid], axis=0, weights=q[valid]
+            )
+            centroid_confidence[patch, animal] = weight_sum / count
+    return (
+        patch_frame_count,
+        centroid,
+        centroid_confidence,
+        centroid_coverage,
+        centroid_valid_count,
     )
-    return extract_social_edges_on_clock(
-        inputs,
-        social_step=social_step,
-        patch_start_s=patch_start_s,
-        patch_end_s=patch_end_s,
-        minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-        clock_parameters={
-            "clock_mode": "fixed_patch_length",
-            "patch_length_s": float(patch_length_s),
-            "clock_start_s": float(clock_start_s),
-            "patch_count_source": (
-                "explicit" if patch_count is not None else "full_video_floor"
-            ),
-            "incomplete_tail_policy": "drop_unless_patch_count_is_explicit",
-        },
-    )
+
+
+def compute_patch_dynamic_traits(
+    *,
+    patch_center_s: np.ndarray,
+    edge_index: np.ndarray,
+    patch_centroid_px: np.ndarray,
+    patch_centroid_confidence: np.ndarray,
+    patch_centroid_coverage: np.ndarray,
+    patch_centroid_valid_count: np.ndarray,
+    state_edge_value: np.ndarray,
+    state_edge_confidence: np.ndarray,
+    state_edge_coverage: np.ndarray,
+    state_edge_valid_count: np.ndarray,
+    minimum_patch_displacement_px: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Derive the three dynamic traits from adjacent patch summaries.
+
+    Dynamic values at index ``t`` use the forward transition ``t -> t+1``.
+    The final patch has no forward transition and therefore retains zero value,
+    confidence, coverage, and valid-count outputs.
+    """
+    if not np.isfinite(minimum_patch_displacement_px) or minimum_patch_displacement_px < 0:
+        raise ValueError("minimum_patch_displacement_px must be finite and non-negative")
+    centers = np.asarray(patch_center_s, dtype=float)
+    dt = np.zeros(len(centers), dtype=np.float64)
+    if len(centers) > 1:
+        dt[:-1] = np.diff(centers)
+        if np.any(dt[:-1] <= 0):
+            raise ValueError("patch centers must be strictly increasing")
+
+    n_patches = len(centers)
+    n_edges = edge_index.shape[1]
+    values = np.zeros((n_patches, n_edges, 3), dtype=np.float32)
+    confidence = np.zeros_like(values)
+    coverage = np.zeros_like(values)
+    valid_count = np.zeros((n_patches, n_edges, 3), dtype=np.int32)
+    eps = 1e-12
+
+    for patch in range(n_patches - 1):
+        delta_t = dt[patch]
+        for edge, (source, target) in enumerate(edge_index.T):
+            source_now = patch_centroid_px[patch, source]
+            source_next = patch_centroid_px[patch + 1, source]
+            target_now = patch_centroid_px[patch, target]
+            target_next = patch_centroid_px[patch + 1, target]
+            q_source_now = float(patch_centroid_confidence[patch, source])
+            q_source_next = float(patch_centroid_confidence[patch + 1, source])
+            q_target_now = float(patch_centroid_confidence[patch, target])
+            q_target_next = float(patch_centroid_confidence[patch + 1, target])
+
+            distance_q = min(
+                float(state_edge_confidence[patch, edge, 0]),
+                float(state_edge_confidence[patch + 1, edge, 0]),
+            )
+            if distance_q > 0:
+                values[patch, edge, 1] = (
+                    state_edge_value[patch, edge, 0]
+                    - state_edge_value[patch + 1, edge, 0]
+                ) / delta_t
+                confidence[patch, edge, 1] = distance_q
+                coverage[patch, edge, 1] = min(
+                    state_edge_coverage[patch, edge, 0],
+                    state_edge_coverage[patch + 1, edge, 0],
+                )
+                valid_count[patch, edge, 1] = min(
+                    state_edge_valid_count[patch, edge, 0],
+                    state_edge_valid_count[patch + 1, edge, 0],
+                )
+
+            pair_vector = target_now - source_now
+            pair_distance = float(np.linalg.norm(pair_vector))
+            radial_q = min(q_source_now, q_source_next, q_target_now)
+            if radial_q > 0 and pair_distance > eps:
+                source_velocity = (source_next - source_now) / delta_t
+                values[patch, edge, 0] = float(
+                    np.dot(source_velocity, pair_vector / pair_distance)
+                )
+                confidence[patch, edge, 0] = radial_q
+                coverage[patch, edge, 0] = min(
+                    patch_centroid_coverage[patch, source],
+                    patch_centroid_coverage[patch + 1, source],
+                    patch_centroid_coverage[patch, target],
+                )
+                valid_count[patch, edge, 0] = min(
+                    patch_centroid_valid_count[patch, source],
+                    patch_centroid_valid_count[patch + 1, source],
+                    patch_centroid_valid_count[patch, target],
+                )
+
+            delta_source = source_next - source_now
+            delta_target = target_next - target_now
+            source_displacement = float(np.linalg.norm(delta_source))
+            target_displacement = float(np.linalg.norm(delta_target))
+            alignment_q = min(
+                q_source_now, q_source_next, q_target_now, q_target_next
+            )
+            if (
+                alignment_q > 0
+                and source_displacement > eps
+                and target_displacement > eps
+            ):
+                values[patch, edge, 2] = float(
+                    np.clip(
+                        np.dot(delta_source, delta_target)
+                        / (source_displacement * target_displacement),
+                        -1.0,
+                        1.0,
+                    )
+                )
+                reliability = 1.0
+                if minimum_patch_displacement_px > 0:
+                    reliability = min(
+                        1.0,
+                        source_displacement / minimum_patch_displacement_px,
+                        target_displacement / minimum_patch_displacement_px,
+                    )
+                confidence[patch, edge, 2] = alignment_q * reliability
+                coverage[patch, edge, 2] = min(
+                    patch_centroid_coverage[patch, source],
+                    patch_centroid_coverage[patch + 1, source],
+                    patch_centroid_coverage[patch, target],
+                    patch_centroid_coverage[patch + 1, target],
+                )
+                valid_count[patch, edge, 2] = min(
+                    patch_centroid_valid_count[patch, source],
+                    patch_centroid_valid_count[patch + 1, source],
+                    patch_centroid_valid_count[patch, target],
+                    patch_centroid_valid_count[patch + 1, target],
+                )
+    return dt, values, confidence, coverage, valid_count
 
 
 def extract_social_edges_on_clock(
@@ -667,26 +724,21 @@ def extract_social_edges_on_clock(
     social_step: np.ndarray,
     patch_start_s: np.ndarray,
     patch_end_s: np.ndarray,
-    minimum_movement_speed_px_s: float = 1.0,
+    minimum_patch_displacement_px: float = 1.0,
     clock_parameters: dict[str, Any] | None = None,
 ) -> EdgeExtractionResult:
     """Aggregate edges on caller-supplied physical time intervals."""
     social_step = np.asarray(social_step, dtype=np.int64)
     patch_start_s = np.asarray(patch_start_s, dtype=np.float64)
     patch_end_s = np.asarray(patch_end_s, dtype=np.float64)
-    if not (
-        social_step.ndim == patch_start_s.ndim == patch_end_s.ndim == 1
-        and len(social_step) == len(patch_start_s) == len(patch_end_s)
-        and len(social_step) > 0
-    ):
-        raise ValueError(
-            "social_step and patch interval arrays must be equal non-empty 1-D arrays"
-        )
+    validate_fixed_patch_grid(
+        patch_start_s,
+        patch_end_s,
+        social_step=social_step,
+        label="edge extraction clock",
+    )
     edge_index, edge_identity, frame_value, frame_confidence = (
-        compute_frame_edge_traits(
-            inputs,
-            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-        )
+        compute_frame_edge_traits(inputs)
     )
     (
         patch_frame_count,
@@ -701,16 +753,56 @@ def extract_social_edges_on_clock(
         patch_start_s=patch_start_s,
         patch_end_s=patch_end_s,
     )
+    (
+        centroid_frame_count,
+        patch_centroid,
+        patch_centroid_confidence,
+        patch_centroid_coverage,
+        patch_centroid_valid_count,
+    ) = aggregate_patch_centroids(
+        frame_time_s=inputs.frame_time_s,
+        position_px=inputs.position_px,
+        position_confidence=inputs.position_confidence,
+        patch_start_s=patch_start_s,
+        patch_end_s=patch_end_s,
+    )
+    if not np.array_equal(patch_frame_count, centroid_frame_count):
+        raise AssertionError("edge and centroid patch frame counts disagree")
+    patch_center_s = (patch_start_s + patch_end_s) / 2.0
+    (
+        patch_delta_t_s,
+        dynamic_value,
+        dynamic_confidence,
+        dynamic_coverage,
+        dynamic_valid_count,
+    ) = compute_patch_dynamic_traits(
+        patch_center_s=patch_center_s,
+        edge_index=edge_index,
+        patch_centroid_px=patch_centroid,
+        patch_centroid_confidence=patch_centroid_confidence,
+        patch_centroid_coverage=patch_centroid_coverage,
+        patch_centroid_valid_count=patch_centroid_valid_count,
+        state_edge_value=edge_value,
+        state_edge_confidence=edge_confidence,
+        state_edge_coverage=edge_coverage,
+        state_edge_valid_count=valid_frame_count,
+        minimum_patch_displacement_px=minimum_patch_displacement_px,
+    )
+    edge_value[:, :, DYNAMIC_TRAIT_INDICES] = dynamic_value
+    edge_confidence[:, :, DYNAMIC_TRAIT_INDICES] = dynamic_confidence
+    edge_coverage[:, :, DYNAMIC_TRAIT_INDICES] = dynamic_coverage
+    valid_frame_count[:, :, DYNAMIC_TRAIT_INDICES] = dynamic_valid_count
     parameters = dict(clock_parameters or {})
     parameters.update(
         {
             "patch_count": int(len(social_step)),
-            "minimum_movement_speed_px_s": float(minimum_movement_speed_px_s),
-            "patch_interval_convention": "[patch_start_s, patch_end_s)",
-            "motion_boundary_policy": (
-                "Exclude each patch's first frame from velocity-derived traits because "
-                "backward velocity uses the preceding frame outside that patch"
+            "minimum_patch_displacement_px": float(
+                minimum_patch_displacement_px
             ),
+            "patch_interval_convention": "[patch_start_s, patch_end_s)",
+            "dynamic_difference_policy": "forward t_to_t_plus_1",
+            "final_patch_dynamic_policy": "zero_value_confidence_coverage",
+            "dynamic_dt_source": "adjacent_patch_centers",
         }
     )
     return EdgeExtractionResult(
@@ -724,7 +816,12 @@ def extract_social_edges_on_clock(
         social_step=social_step,
         patch_start_s=patch_start_s,
         patch_end_s=patch_end_s,
+        patch_center_s=patch_center_s,
+        patch_delta_t_s=patch_delta_t_s,
         patch_frame_count=patch_frame_count,
+        patch_centroid_px=patch_centroid,
+        patch_centroid_confidence=patch_centroid_confidence,
+        patch_centroid_coverage=patch_centroid_coverage,
         edge_value=edge_value,
         edge_confidence=edge_confidence,
         edge_coverage=edge_coverage,
@@ -764,6 +861,8 @@ def write_edge_outputs(
         "social_step",
         "patch_start_s",
         "patch_end_s",
+        "patch_center_s",
+        "patch_delta_t_s",
         "source_identity",
         "target_identity",
         "patch_frame_count",
@@ -786,6 +885,8 @@ def write_edge_outputs(
                     "social_step": int(social_step),
                     "patch_start_s": float(result.patch_start_s[patch]),
                     "patch_end_s": float(result.patch_end_s[patch]),
+                    "patch_center_s": float(result.patch_center_s[patch]),
+                    "patch_delta_t_s": float(result.patch_delta_t_s[patch]),
                     "source_identity": int(result.edge_identity[0, edge]),
                     "target_identity": int(result.edge_identity[1, edge]),
                     "patch_frame_count": int(result.patch_frame_count[patch]),
@@ -807,13 +908,18 @@ def write_edge_outputs(
 
     number_of_animals = len(result.identities)
     payload: dict[str, Any] = {
-        "contract_version": np.asarray("social_edge_features_v0"),
+        "contract_version": np.asarray("social_edge_features_v1"),
         "trait_names": np.asarray(TRAIT_NAMES),
         "trait_units": np.asarray(TRAIT_UNITS),
         "social_step": result.social_step,
         "patch_start_s": result.patch_start_s,
         "patch_end_s": result.patch_end_s,
+        "patch_center_s": result.patch_center_s,
+        "patch_delta_t_s": result.patch_delta_t_s,
         "patch_frame_count": result.patch_frame_count,
+        "patch_centroid_px": result.patch_centroid_px,
+        "patch_centroid_confidence": result.patch_centroid_confidence,
+        "patch_centroid_coverage": result.patch_centroid_coverage,
         "identity": result.identities,
         "edge_index": result.edge_index,
         "edge_identity": result.edge_identity,
@@ -843,7 +949,7 @@ def write_edge_outputs(
     np.savez_compressed(npz_path, **payload)
 
     summary: dict[str, Any] = {
-        "contract_version": "social_edge_features_v0",
+        "contract_version": "social_edge_features_v1",
         "idtracker_csv": str(Path(idtracker_csv).resolve()),
         "matched_mousegpt_csv": str(Path(matched_mousegpt_csv).resolve()),
         "parameters": result.parameters,
@@ -856,8 +962,13 @@ def write_edge_outputs(
             "edge_index": list(result.edge_index.shape),
         },
         "aggregation": {
-            "value": "sum(q_frame * value_frame) / sum(q_frame)",
-            "confidence": "sum(q_frame) / patch_frame_count",
+            "state_traits": [TRAIT_NAMES[index] for index in STATE_TRAIT_INDICES],
+            "dynamic_traits": [TRAIT_NAMES[index] for index in DYNAMIC_TRAIT_INDICES],
+            "state_value": "sum(q_frame * value_frame) / sum(q_frame)",
+            "state_confidence": "sum(q_frame) / patch_frame_count",
+            "dynamic_source": "finite differences between adjacent patch summaries",
+            "dynamic_dt": "patch_center_s[t+1] - patch_center_s[t]",
+            "frame_level_dynamic_channels": "zero_not_computed",
             "coverage": "valid_frame_count / patch_frame_count",
             "missing_value": 0.0,
             "missing_confidence": 0.0,
@@ -884,42 +995,22 @@ def run_edge_extraction(
     matched_mousegpt_csv: Path,
     output_dir: Path,
     output_stem: str,
-    patch_length_s: float | None = None,
-    clock_node_npz: Path | None = None,
-    clock_start_s: float = 0.0,
-    patch_count: int | None = None,
-    minimum_movement_speed_px_s: float = 1.0,
+    clock_node_npz: Path,
+    minimum_patch_displacement_px: float = 1.0,
     save_frame_level: bool = True,
 ) -> dict[str, Any]:
-    if (patch_length_s is None) == (clock_node_npz is None):
-        raise ValueError(
-            "Provide exactly one of patch_length_s or clock_node_npz"
-        )
-    if clock_node_npz is not None and patch_count is not None:
-        raise ValueError(
-            "patch_count cannot be combined with an authoritative clock_node_npz"
-        )
     inputs = load_frame_inputs(idtracker_csv, matched_mousegpt_csv)
-    if clock_node_npz is not None:
-        social_step, patch_start_s, patch_end_s, clock_meta = load_node_clock(
-            clock_node_npz
-        )
-        result = extract_social_edges_on_clock(
-            inputs,
-            social_step=social_step,
-            patch_start_s=patch_start_s,
-            patch_end_s=patch_end_s,
-            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-            clock_parameters=clock_meta,
-        )
-    else:
-        result = extract_social_edges(
-            inputs,
-            patch_length_s=float(patch_length_s),
-            clock_start_s=clock_start_s,
-            patch_count=patch_count,
-            minimum_movement_speed_px_s=minimum_movement_speed_px_s,
-        )
+    social_step, patch_start_s, patch_end_s, clock_meta = load_node_clock(
+        clock_node_npz
+    )
+    result = extract_social_edges_on_clock(
+        inputs,
+        social_step=social_step,
+        patch_start_s=patch_start_s,
+        patch_end_s=patch_end_s,
+        minimum_patch_displacement_px=minimum_patch_displacement_px,
+        clock_parameters=clock_meta,
+    )
     return write_edge_outputs(
         result,
         output_dir=output_dir,
@@ -933,38 +1024,31 @@ def run_edge_extraction(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract eight confidence-aware social edge traits on an authoritative "
-            "node clock or a legacy fixed clock."
+            "Extract eight confidence-aware social edge traits on the fixed "
+            "authoritative node patch grid."
         )
     )
     parser.add_argument("--idtracker-csv", required=True, type=Path)
     parser.add_argument("--matched-mousegpt-csv", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument("--output-stem", required=True)
-    clock = parser.add_mutually_exclusive_group(required=True)
-    clock.add_argument(
-        "--patch-length-s",
-        type=float,
-        help="Legacy fixed duration used only before a node clock exists.",
-    )
-    clock.add_argument(
+    parser.add_argument(
         "--clock-node-npz",
+        required=True,
         type=Path,
         help=(
             "Canonical node NPZ whose patch_start_s/patch_end_s arrays define "
             "the authoritative edge aggregation intervals."
         ),
     )
-    parser.add_argument("--clock-start-s", type=float, default=0.0)
     parser.add_argument(
-        "--patch-count",
-        type=int,
+        "--minimum-patch-displacement-px",
+        type=float,
+        default=1.0,
         help=(
-            "Legacy fixed-clock timestep count; otherwise only full video patches "
-            "are emitted. Cannot be combined with --clock-node-npz."
+            "Motion-noise floor used to downweight patch displacement direction."
         ),
     )
-    parser.add_argument("--minimum-movement-speed-px-s", type=float, default=1.0)
     parser.add_argument("--no-frame-level", action="store_true")
     return parser.parse_args()
 
@@ -976,11 +1060,8 @@ def main() -> int:
         matched_mousegpt_csv=args.matched_mousegpt_csv,
         output_dir=args.outdir,
         output_stem=args.output_stem,
-        patch_length_s=args.patch_length_s,
         clock_node_npz=args.clock_node_npz,
-        clock_start_s=args.clock_start_s,
-        patch_count=args.patch_count,
-        minimum_movement_speed_px_s=args.minimum_movement_speed_px_s,
+        minimum_patch_displacement_px=args.minimum_patch_displacement_px,
         save_frame_level=not args.no_frame_level,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

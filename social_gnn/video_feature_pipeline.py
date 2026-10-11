@@ -45,8 +45,9 @@ class VideoJob:
     video_id: str
     video_path: Path
     output_dir: Path
-    social_patch_count: int | None = None
     node_clock_npz: Path | None = None
+    imu_animals: tuple[dict[str, Any], ...] = ()
+    idtracker_parameters_file: Path | None = None
 
 
 def _now_iso() -> str:
@@ -113,29 +114,37 @@ def build_jobs(
                 f"Duplicate video id {video_id!r}; assign explicit unique ids in the YAML"
             )
         seen_ids.add(video_id)
-        social_patch_count = (
-            int(item["social_patch_count"])
-            if isinstance(item, dict) and item.get("social_patch_count") is not None
-            else None
-        )
-        if social_patch_count is not None and social_patch_count < 1:
-            raise ValueError("social_patch_count must be >= 1")
         node_clock_npz = (
             Path(item["node_clock_npz"]).resolve()
             if isinstance(item, dict) and item.get("node_clock_npz")
+            else None
+        )
+        idtracker_parameters_file = (
+            Path(item["idtracker_parameters_file"]).resolve()
+            if isinstance(item, dict) and item.get("idtracker_parameters_file")
             else None
         )
         if node_clock_npz is not None and not node_clock_npz.is_file():
             raise FileNotFoundError(
                 f"Authoritative node clock not found: {node_clock_npz}"
             )
+        raw_imu_animals = (
+            item.get("imu_animals", []) if isinstance(item, dict) else []
+        )
+        if not isinstance(raw_imu_animals, list) or not all(
+            isinstance(animal, dict) for animal in raw_imu_animals
+        ):
+            raise ValueError(
+                f"Video {video_id!r} imu_animals must be a list of mappings"
+            )
         jobs.append(
             VideoJob(
                 video_id,
                 video_path,
                 output_root / video_id,
-                social_patch_count=social_patch_count,
                 node_clock_npz=node_clock_npz,
+                imu_animals=tuple(dict(animal) for animal in raw_imu_animals),
+                idtracker_parameters_file=idtracker_parameters_file,
             )
         )
     return jobs
@@ -205,6 +214,41 @@ def validate_config(config: dict[str, Any]) -> None:
         if bootstrap:
             _require_file(bootstrap, "idtracker.ai bootstrap parameter profile")
 
+    imu_mapping = config.get("imu_identity_mapping", {})
+    if imu_mapping.get("enabled", False):
+        if not tracker.get("enabled", True) or not tracker.get("export", {}).get(
+            "enabled", True
+        ):
+            raise ValueError(
+                "IMU identity mapping requires idtracker.ai kinematics export"
+            )
+        _require_file(imu_mapping["python"], "IMU identity mapping Python")
+        _require_file(imu_mapping["script"], "IMU identity mapping script")
+        for item in config.get("videos") or []:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    "IMU identity mapping requires mapping-style videos with imu_animals"
+                )
+            animals = item.get("imu_animals") or []
+            if len(animals) != 2 or not all(
+                isinstance(animal, dict) for animal in animals
+            ):
+                raise ValueError(
+                    f"Video {item.get('id', item.get('path'))!r} must define exactly "
+                    "two imu_animals"
+                )
+            labels = [str(animal.get("label", "")).strip() for animal in animals]
+            if any(not label for label in labels) or len(set(labels)) != 2:
+                raise ValueError("imu_animals labels must be non-empty and unique")
+            for animal in animals:
+                _require_file(animal["csv"], f"IMU CSV for {animal['label']}")
+                if animal.get("entry_time_s") is not None and not math.isfinite(
+                    float(animal["entry_time_s"])
+                ):
+                    raise ValueError(
+                        f"entry_time_s for {animal['label']!r} must be finite"
+                    )
+
     matching = config.get("identity_matching", {})
     if matching.get("enabled", False):
         if not mouse.get("enabled", True) or not mouse.get("postprocess", {}).get(
@@ -243,14 +287,10 @@ def validate_config(config: dict[str, Any]) -> None:
                     item["node_clock_npz"],
                     f"authoritative node clock for {item.get('id', item['path'])}",
                 )
-        patch_length_s = edge_extraction.get("patch_length_s")
-        if not global_clock and not per_video_clocks and (
-            patch_length_s is None or float(patch_length_s) <= 0
-        ):
+        if not global_clock and not per_video_clocks:
             raise ValueError(
-                "Enable edge extraction with either videos[].node_clock_npz, "
-                "edge_extraction.clock_node_npz, or a positive legacy "
-                "edge_extraction.patch_length_s"
+                "Edge extraction requires an authoritative node clock through "
+                "videos[].node_clock_npz or edge_extraction.clock_node_npz"
             )
 
 
@@ -802,7 +842,8 @@ def build_idtracker_smoothing_command(
     return command
 
 
-def active_idtracker_features_csv(config: dict[str, Any], job: VideoJob) -> Path:
+def base_idtracker_features_csv(config: dict[str, Any], job: VideoJob) -> Path:
+    """Return the raw or optionally smoothed idtracker kinematics contract."""
     suffix = (
         "_idtracker_kinematics_smoothed.csv"
         if config.get("idtrackerai", {}).get("smoothing", {}).get("enabled", False)
@@ -811,12 +852,204 @@ def active_idtracker_features_csv(config: dict[str, Any], job: VideoJob) -> Path
     return job.output_dir / "idtrackerai" / "features" / f"{job.video_id}{suffix}"
 
 
+def active_idtracker_features_csv(config: dict[str, Any], job: VideoJob) -> Path:
+    """Return the canonical downstream contract when entry anchoring is enabled."""
+    if config.get("imu_identity_mapping", {}).get("enabled", False):
+        return (
+            job.output_dir
+            / "imu_identity_mapping"
+            / f"{job.video_id}_idtracker_kinematics_canonical.csv"
+        )
+    return base_idtracker_features_csv(config, job)
+
+
+def _imu_mapping_parameters(config: dict[str, Any]) -> dict[str, float | int]:
+    mapping = config["imu_identity_mapping"]
+    return {
+        "entry_search_start_s": float(mapping.get("entry_search_start_s", 0.0)),
+        "entry_search_end_s": float(mapping.get("entry_search_end_s", 120.0)),
+        "gravity_window_s": float(mapping.get("gravity_window_s", 0.8)),
+        "threshold_z": float(mapping.get("threshold_z", 6.0)),
+        "after_first_entry_margin_s": float(
+            mapping.get("after_first_entry_margin_s", 0.5)
+        ),
+        "before_second_entry_margin_s": float(
+            mapping.get("before_second_entry_margin_s", 0.5)
+        ),
+        "minimum_anchor_duration_s": float(
+            mapping.get("minimum_anchor_duration_s", 1.0)
+        ),
+        "minimum_anchor_frames": int(mapping.get("minimum_anchor_frames", 10)),
+        "minimum_single_identity_fraction": float(
+            mapping.get("minimum_single_identity_fraction", 0.80)
+        ),
+        "minimum_selected_coverage": float(
+            mapping.get("minimum_selected_coverage", 0.80)
+        ),
+        "maximum_competing_coverage": float(
+            mapping.get("maximum_competing_coverage", 0.20)
+        ),
+        "minimum_coverage_margin": float(
+            mapping.get("minimum_coverage_margin", 0.60)
+        ),
+    }
+
+
+def build_imu_identity_mapping_command(
+    config: dict[str, Any],
+    job: VideoJob,
+    *,
+    idtracker_csv: Path,
+    output_dir: Path,
+) -> list[str]:
+    """Build the post-hoc sequential-entry identity anchoring command."""
+    mapping = config["imu_identity_mapping"]
+    if len(job.imu_animals) != 2:
+        raise ValueError(
+            f"Video {job.video_id!r} requires exactly two imu_animals for mapping"
+        )
+    command = [
+        str(Path(mapping["python"]).resolve()),
+        str(Path(mapping["script"]).resolve()),
+        "--idtracker-csv",
+        str(idtracker_csv),
+        "--outdir",
+        str(output_dir),
+        "--output-stem",
+        job.video_id,
+    ]
+    for animal in job.imu_animals:
+        label = str(animal["label"]).strip()
+        path = Path(animal["csv"]).resolve()
+        command.extend(["--animal", f"{label}={path}"])
+        if animal.get("entry_time_s") is not None:
+            command.extend(
+                ["--entry-time", f"{label}={float(animal['entry_time_s'])}"]
+            )
+    option_names = {
+        "entry_search_start_s": "--entry-search-start-s",
+        "entry_search_end_s": "--entry-search-end-s",
+        "gravity_window_s": "--gravity-window-s",
+        "threshold_z": "--threshold-z",
+        "after_first_entry_margin_s": "--after-first-entry-margin-s",
+        "before_second_entry_margin_s": "--before-second-entry-margin-s",
+        "minimum_anchor_duration_s": "--minimum-anchor-duration-s",
+        "minimum_anchor_frames": "--minimum-anchor-frames",
+        "minimum_single_identity_fraction": "--minimum-single-identity-fraction",
+        "minimum_selected_coverage": "--minimum-selected-coverage",
+        "maximum_competing_coverage": "--maximum-competing-coverage",
+        "minimum_coverage_margin": "--minimum-coverage-margin",
+    }
+    for key, value in _imu_mapping_parameters(config).items():
+        command.extend([option_names[key], str(value)])
+    return command
+
+
+def _imu_mapping_outputs_are_current(
+    summary_json: Path,
+    *,
+    idtracker_csv: Path,
+    job: VideoJob,
+    config: dict[str, Any],
+) -> bool:
+    if not summary_json.is_file():
+        return False
+    try:
+        summary = json.loads(summary_json.read_text(encoding="utf-8"))
+        if summary.get("contract_version") != "sequential_entry_identity_v0":
+            return False
+        if Path(summary["idtracker_csv"]).resolve() != idtracker_csv.resolve():
+            return False
+        if summary.get("parameters") != _imu_mapping_parameters(config):
+            return False
+        events = {event["label"]: event for event in summary["entry_events"]}
+        for animal in job.imu_animals:
+            label = str(animal["label"]).strip()
+            event = events[label]
+            if Path(event["imu_csv"]).resolve() != Path(animal["csv"]).resolve():
+                return False
+            manual = animal.get("entry_time_s")
+            if manual is None and event.get("source") != "automatic_dynamic_acceleration_peak":
+                return False
+            if manual is not None and (
+                event.get("source") != "manual_confirmed"
+                or not math.isclose(
+                    float(event["time_s"]), float(manual), rel_tol=0.0, abs_tol=1e-9
+                )
+            ):
+                return False
+        for signature in summary["input_files"]:
+            path = Path(signature["path"])
+            stat = path.stat()
+            if int(stat.st_size) != int(signature["size"]) or int(
+                stat.st_mtime_ns
+            ) != int(signature["mtime_ns"]):
+                return False
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
+def run_imu_identity_mapping_stage(
+    config: dict[str, Any], job: VideoJob, *, dry_run: bool, resume: bool
+) -> dict[str, Any]:
+    mapping = config["imu_identity_mapping"]
+    idtracker_csv = base_idtracker_features_csv(config, job)
+    output_dir = job.output_dir / "imu_identity_mapping"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = job.output_dir / "logs"
+    canonical_csv = (
+        output_dir / f"{job.video_id}_idtracker_kinematics_canonical.csv"
+    )
+    mapping_csv = output_dir / f"{job.video_id}_imu_video_identity_mapping.csv"
+    summary_json = output_dir / f"{job.video_id}_imu_video_identity_mapping.json"
+    reused = resume and all(
+        path.is_file() for path in (canonical_csv, mapping_csv, summary_json)
+    ) and _imu_mapping_outputs_are_current(
+        summary_json,
+        idtracker_csv=idtracker_csv,
+        job=job,
+        config=config,
+    )
+    if reused:
+        process_result: dict[str, Any] = {"status": "skipped_existing"}
+    else:
+        process_result = run_process(
+            label=f"{job.video_id}:imu-identity-mapping",
+            command=build_imu_identity_mapping_command(
+                config,
+                job,
+                idtracker_csv=idtracker_csv,
+                output_dir=output_dir,
+            ),
+            cwd=Path(mapping["script"]).resolve().parent,
+            log_path=log_dir / "imu_identity_mapping.log",
+            env=None,
+            dry_run=dry_run,
+        )
+        if not dry_run and not all(
+            path.is_file() for path in (canonical_csv, mapping_csv, summary_json)
+        ):
+            raise FileNotFoundError(
+                "IMU identity mapper did not create the expected outputs"
+            )
+    return {
+        "status": "dry_run" if dry_run else "completed",
+        "canonical_idtracker_csv": str(canonical_csv),
+        "mapping_csv": str(mapping_csv),
+        "summary_json": str(summary_json),
+        "mapping": process_result,
+    }
+
+
 def _matching_outputs_are_current(summary_json: Path, idtracker_csv: Path) -> bool:
     if not summary_json.is_file():
         return False
     try:
         summary = json.loads(summary_json.read_text(encoding="utf-8"))
         recorded = Path(summary["idtracker_csv"]).resolve()
+        if idtracker_csv.stat().st_mtime_ns > summary_json.stat().st_mtime_ns:
+            return False
     except (OSError, ValueError, TypeError, KeyError):
         return False
     return recorded == idtracker_csv.resolve()
@@ -1006,34 +1239,15 @@ def build_edge_extraction_command(
         str(output_dir),
         "--output-stem",
         job.video_id,
-        "--minimum-movement-speed-px-s",
-        str(edge_cfg.get("minimum_movement_speed_px_s", 1.0)),
+        "--minimum-patch-displacement-px",
+        str(edge_cfg.get("minimum_patch_displacement_px", 1.0)),
     ]
     clock_node_npz = _edge_clock_for_job(config, job)
-    if clock_node_npz is not None:
-        command.extend(["--clock-node-npz", str(clock_node_npz)])
-    else:
-        patch_length_s = edge_cfg.get("patch_length_s")
-        if patch_length_s is None or float(patch_length_s) <= 0:
-            raise ValueError(
-                f"Video {job.video_id!r} has no authoritative node clock and "
-                "no positive legacy patch_length_s"
-            )
-        command.extend(
-            [
-                "--patch-length-s",
-                str(patch_length_s),
-                "--clock-start-s",
-                str(edge_cfg.get("clock_start_s", 0.0)),
-            ]
+    if clock_node_npz is None:
+        raise ValueError(
+            f"Video {job.video_id!r} has no authoritative node clock"
         )
-        patch_count = (
-            job.social_patch_count
-            if job.social_patch_count is not None
-            else edge_cfg.get("patch_count")
-        )
-        if patch_count is not None:
-            command.extend(["--patch-count", str(patch_count)])
+    command.extend(["--clock-node-npz", str(clock_node_npz)])
     if not edge_cfg.get("save_frame_level", True):
         command.append("--no-frame-level")
     return command
@@ -1044,39 +1258,44 @@ def _edge_outputs_are_current(
     *,
     idtracker_csv: Path,
     matched_mousegpt_csv: Path,
-    patch_length_s: float | None,
-    patch_count: int | None,
-    clock_node_npz: Path | None = None,
+    clock_node_npz: Path,
+    minimum_patch_displacement_px: float,
 ) -> bool:
     if not summary_json.is_file():
         return False
     try:
         summary = json.loads(summary_json.read_text(encoding="utf-8"))
         parameters = summary["parameters"]
-        recorded_count = parameters.get("patch_count")
         source_matches = (
             Path(summary["idtracker_csv"]).resolve() == idtracker_csv.resolve()
             and Path(summary["matched_mousegpt_csv"]).resolve()
             == matched_mousegpt_csv.resolve()
         )
-        if clock_node_npz is not None:
-            stat = clock_node_npz.stat()
-            clock_matches = (
-                parameters.get("clock_mode") == "authoritative_node_intervals"
-                and Path(parameters["clock_node_npz"]).resolve()
-                == clock_node_npz.resolve()
-                and int(parameters["clock_source_size"]) == stat.st_size
-                and int(parameters["clock_source_mtime_ns"]) == stat.st_mtime_ns
-            )
-            return source_matches and clock_matches
-        duration_matches = math.isclose(
-            float(parameters["patch_length_s"]),
-            float(patch_length_s),
+        stat = clock_node_npz.stat()
+        if any(
+            source.stat().st_mtime_ns > summary_json.stat().st_mtime_ns
+            for source in (idtracker_csv, matched_mousegpt_csv)
+        ):
+            return False
+        clock_matches = (
+            parameters.get("clock_mode") == "authoritative_node_intervals"
+            and Path(parameters["clock_node_npz"]).resolve()
+            == clock_node_npz.resolve()
+            and int(parameters["clock_source_size"]) == stat.st_size
+            and int(parameters["clock_source_mtime_ns"]) == stat.st_mtime_ns
+        )
+        threshold_matches = math.isclose(
+            float(parameters["minimum_patch_displacement_px"]),
+            float(minimum_patch_displacement_px),
             rel_tol=0.0,
             abs_tol=1e-12,
         )
-        count_matches = patch_count is None or int(recorded_count) == int(patch_count)
-        return source_matches and duration_matches and count_matches
+        return (
+            summary.get("contract_version") == "social_edge_features_v1"
+            and source_matches
+            and clock_matches
+            and threshold_matches
+        )
     except (OSError, ValueError, TypeError, KeyError):
         return False
 
@@ -1098,28 +1317,18 @@ def run_edge_extraction_stage(
     output_npz = output_dir / f"{job.video_id}_social_edges.npz"
     summary_json = output_dir / f"{job.video_id}_social_edges_summary.json"
     clock_node_npz = _edge_clock_for_job(config, job)
-    patch_length_s = (
-        None
-        if clock_node_npz is not None
-        else float(edge_cfg["patch_length_s"])
-    )
-    patch_count = (
-        None
-        if clock_node_npz is not None
-        else (
-            job.social_patch_count
-            if job.social_patch_count is not None
-            else edge_cfg.get("patch_count")
-        )
+    if clock_node_npz is None:
+        raise ValueError(f"Video {job.video_id!r} has no authoritative node clock")
+    minimum_patch_displacement_px = float(
+        edge_cfg.get("minimum_patch_displacement_px", 1.0)
     )
     outputs_exist = all(path.is_file() for path in (output_csv, output_npz, summary_json))
     current = outputs_exist and _edge_outputs_are_current(
         summary_json,
         idtracker_csv=idtracker_csv,
         matched_mousegpt_csv=matched_mousegpt_csv,
-        patch_length_s=patch_length_s,
-        patch_count=int(patch_count) if patch_count is not None else None,
         clock_node_npz=clock_node_npz,
+        minimum_patch_displacement_px=minimum_patch_displacement_px,
     )
     if resume and current:
         extraction_result: dict[str, Any] = {"status": "skipped_existing"}
@@ -1146,16 +1355,9 @@ def run_edge_extraction_stage(
             )
     return {
         "status": "dry_run" if dry_run else "completed",
-        "clock_mode": (
-            "authoritative_node_intervals"
-            if clock_node_npz is not None
-            else "fixed_patch_length"
-        ),
-        "clock_node_npz": (
-            str(clock_node_npz) if clock_node_npz is not None else None
-        ),
-        "patch_length_s": patch_length_s,
-        "patch_count": int(patch_count) if patch_count is not None else None,
+        "clock_mode": "authoritative_node_intervals",
+        "clock_node_npz": str(clock_node_npz),
+        "minimum_patch_displacement_px": minimum_patch_displacement_px,
         "edge_csv": str(output_csv),
         "edge_npz": str(output_npz),
         "summary_json": str(summary_json),
@@ -1200,9 +1402,12 @@ def run_job(
     manual_gui = idtracker_manual_for_job(
         policy=tracker.get("gui_policy", "first_video"),
         job_index=job_index,
-        reusable_profile_exists=reusable_profile.is_file(),
+        reusable_profile_exists=(
+            job.idtracker_parameters_file or reusable_profile
+        ).is_file(),
         force_recalibrate=bool(tracker.get("force_recalibrate", False)),
     )
+    job_parameter_profile = job.idtracker_parameters_file or reusable_profile
 
     branches: dict[str, Callable[[], dict[str, Any]]] = {}
     if config.get("mousegpt", {}).get("enabled", True):
@@ -1214,7 +1419,7 @@ def run_job(
             config,
             job,
             manual_gui=manual_gui,
-            reusable_profile=reusable_profile,
+            reusable_profile=job_parameter_profile,
             bootstrap_profile=bootstrap_profile,
             dry_run=dry_run,
             resume=resume,
@@ -1239,8 +1444,26 @@ def run_job(
         for name, result in status["branches"].items()
         if result.get("status") == "failed"
     ]
+    failed_stages: list[str] = []
+    imu_mapping_cfg = config.get("imu_identity_mapping", {})
+    idtracker_failed = "idtrackerai" in failed_branches
+    if imu_mapping_cfg.get("enabled", False) and not idtracker_failed:
+        _stage_name, imu_mapping_result = _safe_branch(
+            "imu_identity_mapping",
+            lambda: run_imu_identity_mapping_stage(
+                config, job, dry_run=dry_run, resume=resume
+            ),
+        )
+        status["imu_identity_mapping"] = imu_mapping_result
+    if status.get("imu_identity_mapping", {}).get("status") == "failed":
+        failed_stages.append("imu_identity_mapping")
+
     matching_cfg = config.get("identity_matching", {})
-    if matching_cfg.get("enabled", False) and not failed_branches:
+    if (
+        matching_cfg.get("enabled", False)
+        and not failed_branches
+        and not failed_stages
+    ):
         _stage_name, matching_result = _safe_branch(
             "identity_matching",
             lambda: run_identity_matching_stage(
@@ -1249,7 +1472,6 @@ def run_job(
         )
         status["identity_matching"] = matching_result
 
-    failed_stages = []
     if status.get("identity_matching", {}).get("status") == "failed":
         failed_stages.append("identity_matching")
     edge_cfg = config.get("edge_extraction", {})

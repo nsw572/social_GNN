@@ -1,4 +1,4 @@
-"""Minimal Social-V0 encoder with a dependency-free GINE-style layer."""
+"""Patch-level Social-GNN encoder with a dependency-free GINE-style layer."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import torch
 from torch import nn
 
 from .graph_builder import validate_v0_inputs
-from .temporal import TemporalConvNet
 
 
 class EdgeAwareGINELayer(nn.Module):
@@ -22,17 +21,38 @@ class EdgeAwareGINELayer(nn.Module):
             nn.Linear(node_dim + hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim)
         )
 
-    def forward(self, x: torch.Tensor, edge_attr: torch.Tensor) -> torch.Tensor:
-        # x: [B, N, D], edge_attr: [B, N, N, F], edge_attr[i,j] means i -> j.
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_attr: torch.Tensor,
+        node_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # x: [B, N, D], edge_attr: [B, source, target, F].
+        batch_size, number_of_nodes, _ = x.shape
         edge = self.edge_encoder(edge_attr)
-        sender = x[:, None, :, :].expand(-1, x.shape[1], -1, -1)
+        sender = x[:, :, None, :].expand(-1, -1, number_of_nodes, -1)
         messages = self.message_mlp(sender + edge)
-        aggregate = messages.sum(dim=2)
-        return self.node_update(torch.cat((x, aggregate), dim=-1))
+        edge_valid = ~torch.eye(
+            number_of_nodes, dtype=torch.bool, device=x.device
+        ).view(1, number_of_nodes, number_of_nodes)
+        edge_valid = edge_valid.expand(batch_size, -1, -1)
+        if node_mask is not None:
+            if node_mask.shape != (batch_size, number_of_nodes):
+                raise ValueError("node_mask must have shape [B,N]")
+            edge_valid = edge_valid & (
+                node_mask[:, :, None] & node_mask[:, None, :]
+            )
+        messages = messages * edge_valid.to(dtype=messages.dtype).unsqueeze(-1)
+        # Sum over sources so output index j receives all i -> j messages.
+        aggregate = messages.sum(dim=1)
+        output = self.node_update(torch.cat((x, aggregate), dim=-1))
+        if node_mask is not None:
+            output = output * node_mask.to(dtype=output.dtype).unsqueeze(-1)
+        return output
 
 
 class SocialV0(nn.Module):
-    """GINE-style animal graph encoder producing one embedding per time window.
+    """GINE-style animal graph encoder producing one independent ``g_t`` per patch.
 
     Inputs: ``node_features [B,T,N,D]`` and ``edge_features [B,T,N,N,F]``.
     Output: ``graph_embedding [B,T,H]``. For N=1, message passing is bypassed
@@ -54,75 +74,34 @@ class SocialV0(nn.Module):
         node_features: torch.Tensor,
         edge_features: torch.Tensor,
         node_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        *,
+        return_node_embeddings: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, t, n, _d, _f = validate_v0_inputs(node_features, edge_features)
         x = self.node_input(node_features)
+        if node_mask is not None:
+            if node_mask.shape != (b, t, n):
+                raise ValueError("node_mask must have shape [B,T,N]")
+            # A masked node must not contribute its placeholder activation as a
+            # sender during message passing. Edge inputs remain available so a
+            # decoder can reconstruct the missing node from social context.
+            x = x * node_mask.to(dtype=x.dtype).unsqueeze(-1)
         if n >= 2:
             for layer, norm in zip(self.layers, self.norms):
                 flat_x = x.reshape(b * t, n, -1)
                 flat_e = edge_features.reshape(b * t, n, n, -1)
-                flat_x = norm(layer(flat_x, flat_e) + flat_x)
+                flat_mask = (
+                    node_mask.reshape(b * t, n) if node_mask is not None else None
+                )
+                flat_x = norm(layer(flat_x, flat_e, node_mask=flat_mask) + flat_x)
                 x = flat_x.reshape(b, t, n, -1)
+                if node_mask is not None:
+                    x = x * node_mask.to(dtype=x.dtype).unsqueeze(-1)
         if node_mask is None:
-            return x.mean(dim=2)
-        if node_mask.shape != (b, t, n):
-            raise ValueError("node_mask must have shape [B,T,N]")
-        weights = node_mask.to(dtype=x.dtype).unsqueeze(-1)
-        return (x * weights).sum(dim=2) / weights.sum(dim=2).clamp_min(1.0)
-
-
-class SocialGNNWithTCN(nn.Module):
-    """Compose patch-wise graph encoding with causal temporal modelling.
-
-    The returned ``social_state [B,T,D_s]`` is the ``s_t`` interface expected
-    by a future SSL decoder. This module intentionally does not define a
-    decoder target or loss before the upstream SSL objective is specified.
-    """
-
-    def __init__(
-        self,
-        node_dim: int,
-        edge_dim: int,
-        *,
-        graph_hidden_dim: int = 64,
-        graph_layers: int = 2,
-        temporal_hidden_dim: int = 64,
-        tcn_levels: int = 4,
-        tcn_kernel_size: int = 3,
-        tcn_dilation_base: int = 2,
-        tcn_dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-        self.graph_encoder = SocialV0(
-            node_dim=node_dim,
-            edge_dim=edge_dim,
-            hidden_dim=graph_hidden_dim,
-            layers=graph_layers,
-        )
-        self.temporal_encoder = TemporalConvNet(
-            input_dim=graph_hidden_dim,
-            hidden_dim=temporal_hidden_dim,
-            levels=tcn_levels,
-            kernel_size=tcn_kernel_size,
-            dilation_base=tcn_dilation_base,
-            dropout=tcn_dropout,
-        )
-
-    def forward(
-        self,
-        node_features: torch.Tensor,
-        edge_features: torch.Tensor,
-        node_mask: torch.Tensor | None = None,
-        time_mask: torch.Tensor | None = None,
-        *,
-        return_graph_embeddings: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        graph_embeddings = self.graph_encoder(
-            node_features, edge_features, node_mask=node_mask
-        )
-        if time_mask is None and node_mask is not None:
-            time_mask = node_mask.to(dtype=torch.bool).any(dim=2)
-        social_state = self.temporal_encoder(graph_embeddings, time_mask=time_mask)
-        if return_graph_embeddings:
-            return social_state, graph_embeddings
-        return social_state
+            graph_embedding = x.mean(dim=2)
+        else:
+            weights = node_mask.to(dtype=x.dtype).unsqueeze(-1)
+            graph_embedding = (x * weights).sum(dim=2) / weights.sum(dim=2).clamp_min(1.0)
+        if return_node_embeddings:
+            return graph_embedding, x
+        return graph_embedding

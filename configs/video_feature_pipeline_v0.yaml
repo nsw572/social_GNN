@@ -2,12 +2,21 @@ version: video_feature_pipeline_v0
 
 videos:
   - id: data1_001
-    # Preferred: canonical NPZ from h_zip_node_converter.py. Its exact,
-    # potentially overlapping patch intervals become the social clock.
+    # Required when edge extraction is enabled: canonical node NPZ from
+    # h_zip_node_converter.py. Its fixed, potentially overlapping intervals
+    # are the only Social-GNN patch grid.
     node_clock_npz: null
-    # Legacy fixed-clock fallback only.
-    social_patch_count: null
     path: 'D:\wxh本地化处理库\DLC\headpoint-wxh-2026-07-27\videos\data1_001.mp4'
+    # Required only when imu_identity_mapping.enabled is true. Canonical
+    # animal 1 is the animal with the earlier entry_time_s. Omit entry_time_s
+    # to detect the strongest early gravity-compensated acceleration peak.
+    # imu_animals:
+    #   - label: A4_1c
+    #     csv: 'Y:\WSB\Computational_Ethology\processed_Data\Test\A4_B4_A4-1c.csv'
+    #     entry_time_s: 19.923811
+    #   - label: B4_ab
+    #     csv: 'Y:\WSB\Computational_Ethology\processed_Data\Test\A4_B4_B4-ab.csv'
+    #     entry_time_s: 57.083811
 
 # Keep generated videos, predictions, sessions, and logs outside the code tree.
 output_root: 'C:\Users\DELL\Desktop\video_edge_inputs_v0'
@@ -96,6 +105,29 @@ idtrackerai:
     maximum_transition_expansion_seconds: 1.0
     interpolation_confidence: 0.05
 
+# Optional post-hoc permutation of arbitrary idtracker.ai IDs into canonical
+# IMU identities. It never edits the idtracker.ai session. The mapper requires
+# a stable single-animal interval between two sequential entries and raises on
+# ambiguous evidence instead of guessing.
+imu_identity_mapping:
+  enabled: false
+  python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
+  script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\sequential_entry_identity.py'
+  entry_search_start_s: 0.0
+  entry_search_end_s: 120.0
+  gravity_window_s: 0.8
+  threshold_z: 6.0
+  # Entry is a sharp drop event, so only exclude the immediate transition.
+  # Identity quality is guarded below by frame-level coverage checks.
+  after_first_entry_margin_s: 0.5
+  before_second_entry_margin_s: 0.5
+  minimum_anchor_duration_s: 1.0
+  minimum_anchor_frames: 10
+  minimum_single_identity_fraction: 0.80
+  minimum_selected_coverage: 0.80
+  maximum_competing_coverage: 0.20
+  minimum_coverage_margin: 0.60
+
 identity_matching:
   enabled: true
   python: 'C:\Users\DELL\anaconda3\envs\deepof\python.exe'
@@ -133,11 +165,7 @@ edge_extraction:
   # Optional global clock fallback. Prefer videos[].node_clock_npz when each
   # video has a different trial package.
   clock_node_npz: null
-  # Legacy mode only: use this before an authoritative node NPZ exists.
-  patch_length_s: null
-  clock_start_s: 0.0
-  # videos[].social_patch_count takes precedence. If both counts are null,
-  # only complete fixed patches covered by the video are emitted.
-  patch_count: null
-  minimum_movement_speed_px_s: 1.0
+  # Displacements below this patch-to-patch noise floor reduce movement
+  # direction alignment confidence.
+  minimum_patch_displacement_px: 1.0
   save_frame_level: true

@@ -175,6 +175,18 @@ class HZipConverterTest(unittest.TestCase):
         self.assertAlmostEqual(float(patch_values[1, 0, 0]), 15.0)
         np.testing.assert_allclose(coverage[:, 0, 0], 1.0)
 
+    def test_authoritative_clock_rejects_variable_patch_stride(self):
+        path = self.output_dir / "variable_clock.npz"
+        starts = np.asarray([0.0, 0.5, 1.1])
+        np.savez_compressed(
+            path,
+            patch_start_s=starts,
+            patch_end_s=starts + 1.0,
+            social_step=np.arange(3),
+        )
+        with self.assertRaisesRegex(ValueError, "variable patch stride"):
+            load_node_clock(path)
+
 
 if __name__ == "__main__":
     unittest.main()

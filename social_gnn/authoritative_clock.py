@@ -9,6 +9,66 @@ from typing import Any
 import numpy as np
 
 
+def validate_fixed_patch_grid(
+    patch_start_s: np.ndarray,
+    patch_end_s: np.ndarray,
+    *,
+    social_step: np.ndarray | None = None,
+    label: str = "authoritative clock",
+) -> dict[str, Any]:
+    """Validate one fixed-duration, fixed-stride physical patch grid."""
+    starts = np.asarray(patch_start_s, dtype=np.float64)
+    ends = np.asarray(patch_end_s, dtype=np.float64)
+    if starts.ndim != 1 or ends.ndim != 1:
+        raise ValueError(f"{label}: patch_start_s and patch_end_s must be 1-D")
+    if not len(starts) or len(starts) != len(ends):
+        raise ValueError(f"{label}: patch arrays must have the same non-zero length")
+    if not np.isfinite(starts).all() or not np.isfinite(ends).all():
+        raise ValueError(f"{label}: patch times must be finite")
+    durations = ends - starts
+    invalid_duration = np.flatnonzero(durations <= 0)
+    if invalid_duration.size:
+        index = int(invalid_duration[0])
+        raise ValueError(
+            f"{label}: patch {index} has non-positive duration "
+            f"[{starts[index]}, {ends[index]})"
+        )
+    if not np.allclose(durations, durations[0], rtol=1e-9, atol=1e-9):
+        index = int(np.flatnonzero(~np.isclose(
+            durations, durations[0], rtol=1e-9, atol=1e-9
+        ))[0])
+        raise ValueError(
+            f"{label}: variable patch duration at index {index}; "
+            "Social-GNN requires one fixed patch granularity"
+        )
+    centers = (starts + ends) / 2.0
+    strides = np.diff(centers)
+    if strides.size and np.any(strides <= 0):
+        index = int(np.flatnonzero(strides <= 0)[0] + 1)
+        raise ValueError(f"{label}: patch centers are not increasing at index {index}")
+    if strides.size and not np.allclose(
+        strides, strides[0], rtol=1e-9, atol=1e-9
+    ):
+        index = int(np.flatnonzero(~np.isclose(
+            strides, strides[0], rtol=1e-9, atol=1e-9
+        ))[0] + 1)
+        raise ValueError(
+            f"{label}: variable patch stride at index {index}; "
+            "Social-GNN requires one fixed patch grid"
+        )
+    if social_step is not None:
+        steps = np.asarray(social_step, dtype=np.int64)
+        if steps.ndim != 1 or len(steps) != len(starts):
+            raise ValueError(f"{label}: social_step must align with patch arrays")
+        if len(steps) > 1 and not np.all(np.diff(steps) == 1):
+            raise ValueError(f"{label}: social_step must be consecutive")
+    return {
+        "patch_duration_s": float(durations[0]),
+        "patch_stride_s": float(strides[0]) if strides.size else None,
+        "overlapping": bool(strides.size and strides[0] < durations[0]),
+    }
+
+
 def load_node_clock(
     node_npz: str | Path,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
@@ -37,27 +97,9 @@ def load_node_clock(
     except (OSError, ValueError) as exc:
         raise ValueError(f"Could not load authoritative node clock {node_npz}: {exc}") from exc
 
-    if starts.ndim != 1 or ends.ndim != 1 or steps.ndim != 1:
-        raise ValueError("patch_start_s, patch_end_s and social_step must be 1-D")
-    if not len(starts) or not (len(starts) == len(ends) == len(steps)):
-        raise ValueError("authoritative clock arrays must have the same non-zero length")
-    if not np.isfinite(starts).all() or not np.isfinite(ends).all():
-        raise ValueError("authoritative patch times must be finite")
-    invalid_duration = np.flatnonzero(ends <= starts)
-    if invalid_duration.size:
-        index = int(invalid_duration[0])
-        raise ValueError(
-            f"authoritative patch {index} has non-positive duration "
-            f"[{starts[index]}, {ends[index]})"
-        )
-    if len(starts) > 1 and np.any(np.diff(starts) <= 0):
-        index = int(np.flatnonzero(np.diff(starts) <= 0)[0] + 1)
-        raise ValueError(f"patch_start_s must be strictly increasing at index {index}")
-    if len(ends) > 1 and np.any(np.diff(ends) <= 0):
-        index = int(np.flatnonzero(np.diff(ends) <= 0)[0] + 1)
-        raise ValueError(f"patch_end_s must be strictly increasing at index {index}")
-    if len(np.unique(steps)) != len(steps):
-        raise ValueError("social_step values must be unique")
+    grid = validate_fixed_patch_grid(
+        starts, ends, social_step=steps, label="authoritative node clock"
+    )
 
     digest = hashlib.sha256()
     digest.update(starts.tobytes(order="C"))
@@ -72,10 +114,10 @@ def load_node_clock(
         "clock_source_mtime_ns": node_npz.stat().st_mtime_ns,
         "trial_id": trial_id,
         "patch_count": int(len(starts)),
+        **grid,
         "duration_s_min": float(durations.min()),
         "duration_s_max": float(durations.max()),
         "stride_s_min": float(strides.min()) if strides.size else None,
         "stride_s_max": float(strides.max()) if strides.size else None,
-        "overlapping": bool(strides.size and np.any(starts[1:] < ends[:-1])),
     }
     return steps, starts, ends, metadata

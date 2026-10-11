@@ -13,6 +13,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
+try:
+    from .authoritative_clock import validate_fixed_patch_grid
+except ImportError:  # pragma: no cover - direct script execution
+    from authoritative_clock import validate_fixed_patch_grid
+
 
 NODE_CONTRACT_VERSION = "social_node_features_v0"
 REQUIRED_FILES = ("latents.npz", "patches.csv", "meta.json")
@@ -307,6 +312,15 @@ def convert_h_zip_to_node_npz(
         if len(starts) > 1 and np.any(np.diff(starts) <= 0):
             index = int(np.flatnonzero(np.diff(starts) <= 0)[0] + 1)
             _fail(resolved_id, f"patch_start_s is not increasing at {index}")
+        try:
+            validate_fixed_patch_grid(
+                starts,
+                ends,
+                social_step=np.arange(len(starts), dtype=np.int64),
+                label="upstream H patch clock",
+            )
+        except ValueError as exc:
+            _fail(resolved_id, str(exc))
 
         latent_shapes = {array.shape for array in latents}
         if len(latent_shapes) != 1:
