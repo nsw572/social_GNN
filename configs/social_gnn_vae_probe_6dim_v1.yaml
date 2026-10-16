@@ -1,0 +1,37 @@
+version: social_gnn_experiment_v0
+output_dir: evaluation_runs/vae_gnn_probe_v1/training
+seed: 20261013
+device: cuda:1
+
+trials:
+  - {id: A1_C1, node_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A1_C1_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A1_C1\edges\A1_C1_social_edges.npz'}
+  - {id: A3_C3, node_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A3_C3_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A3_C3\edges\A3_C3_social_edges.npz'}
+  - {id: A4_B4, node_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A4_B4_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A4_B4\edges\A4_B4_social_edges.npz'}
+  - {id: A4_C4, node_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A4_C4_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A4_C4\edges\A4_C4_social_edges.npz'}
+  - {id: A5_C5, node_npz: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\nodes\A5_C5_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A5_C5\edges\A5_C5_social_edges.npz'}
+
+split:
+  validation_trials: [A4_C4]
+  excluded_trials: [A5_C5]
+
+normalization: {epsilon: 1.0e-6}
+
+model:
+  hidden_dim: 64
+  layers: 2
+  decoder_hidden_dim: 64
+
+vae:
+  latent_dim: 32
+  kl_beta: 0.001
+
+training:
+  epochs: 100
+  batch_size: 1
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 5.0
+
+runs:
+  - {name: vae_gnn, objective: vae, edge_mode: full, selection_metric: total}

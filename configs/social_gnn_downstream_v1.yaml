@@ -1,0 +1,46 @@
+version: social_gnn_downstream_v1
+
+encoder:
+  experiment_config: configs/social_gnn_selected_graph_mean_6dim_v1.yaml
+  checkpoint: evaluation_runs/next_phase/selected_graph_mean/best.pt
+  embedding_dir: evaluation_runs/downstream_v1/graph_mean/embeddings
+  frozen: true
+
+split:
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  validation_trials: [A4_C4]
+  exploratory_only_trials: [A5_C5]
+
+preprocessing:
+  standardize_from_training_trials_only: true
+  selected_pca_dim: 16
+  evaluated_dimensions: [64, 16]
+
+search:
+  state_counts: [4, 6, 8, 10, 12]
+  seeds: [0, 1, 2, 3, 4]
+  covariance_floor: 0.001
+  hmm_max_iterations: 40
+  hsmm_max_iterations: 20
+  convergence_tolerance: 0.0001
+
+selected_hmm:
+  type: diagonal_gaussian_hmm
+  states: 6
+  seed: 4
+  checkpoint: evaluation_runs/downstream_v1/selected_hmm/model.npz
+  preprocessing: evaluation_runs/downstream_v1/selected_hmm/preprocessing.npz
+
+selected_hsmm:
+  type: shifted_poisson_diagonal_gaussian_hsmm
+  states: 6
+  seed: 2
+  maximum_duration_timesteps: 100
+  nominal_maximum_duration_s: 16.0
+  checkpoint: evaluation_runs/downstream_v1/selected_hsmm/model.npz
+  preprocessing: evaluation_runs/downstream_v1/selected_hsmm/preprocessing.npz
+
+timing:
+  convention: patch_center_voronoi_boundaries
+  derive_stride_from_timestamps: true
+  never_join_trials_or_invalid_gaps: true

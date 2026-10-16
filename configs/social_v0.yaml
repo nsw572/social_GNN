@@ -1,6 +1,6 @@
 version: social_v0
 model: gine
-node_dim: 6    # selected upstream 6dim continuous IMU latent h_i^t
+node_dim: null # inferred from SocialTrialPackage.node_features.shape[-1] (currently 9)
 edge_dim: 16   # 8 values + 8 coverage-aware per-trait confidences
 hidden_dim: 64
 layers: 2

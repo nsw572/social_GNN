@@ -55,7 +55,10 @@ Example:
 from social_gnn import MaskedSocialSSL, SocialMaskConfig
 from social_gnn.masked_social_ssl import masked_social_reconstruction_loss
 
-model = MaskedSocialSSL(node_dim=6, hidden_dim=64)
+model = MaskedSocialSSL(
+    node_dim=batch["node_features"].shape[-1],
+    hidden_dim=64,
+)
 output = model(batch, mask_config=SocialMaskConfig(node_mask_probability=0.15))
 loss = masked_social_reconstruction_loss(output, batch)["total"]
 ```
@@ -121,7 +124,7 @@ Exact duplicate latent streams are rejected as a likely upstream recombination
 failure. `--allow-duplicate-nodes` exists only for interface tests; its output
 is marked `training_eligible=false`.
 
-For the mature per-animal 6D files (`downstream [S,6]`, `time [S]`, and
+For mature per-animal latent files (`downstream [S,D_node]`, `time [S]`, and
 `interp_mask [S]`), use the separate fixed-clock converter. It assigns latent
 timestamps to half-open 0.16 s patches and computes one validity-weighted mean
 per animal and patch. At 25 Hz this normally pools four latent vectors into one
@@ -135,6 +138,7 @@ python -m social_gnn.latent_node_converter `
   --animal 'A4_1c=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_A4-1c_latent.npz' `
   --animal 'B4_ab=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_B4-ab_latent.npz' `
   --output-identity 1 2 `
+  --authoritative-clock-npz C:\canonical_nodes\A4_B4_node_features.npz `
   --output-node-npz D:\social_trials\A4_B4\node_features.npz
 ```
 
@@ -145,7 +149,12 @@ weight is present. `--interpolated-weight` and
 `node_weight_coverage`, `node_interp_fraction`, and `node_sample_count` as QC
 arrays; padding is still performed only later by the DataLoader. Optional
 `--clock-start-s`/`--clock-end-s` bounds can restrict conversion to the strict
-video/IMU overlap without changing the 0.16 s grid.
+video/IMU overlap without changing the 0.16 s grid. For replacement latent
+deliveries, prefer `--authoritative-clock-npz`: it preserves the existing full
+trial clock, `social_step`, identity order, and source-animal order exactly.
+Patches outside the delivered latent support remain present with zero values
+and `node_mask=false`, so they cannot silently enter training or bridge a
+downstream temporal sequence.
 
 The converter permits only sub-microsecond-scale floating timestamp jitter and
 extra samples confined to stream boundaries. It trims those boundary extras,
@@ -439,3 +448,110 @@ edge_extraction:
 share one clock file. There is no legacy `patch_length_s` mode.
 `SocialTrialPackage.from_npz` verifies fixed-grid validity and exact node/edge
 identity and patch-time equality before training.
+# Relational representation evaluation
+
+Frozen edge sensitivity and information-retention diagnostics are available as
+module entry points:
+
+```powershell
+python -m social_gnn.evaluate_edge_sensitivity `
+  --experiment-config configs/social_gnn_strict_baseline_6dim_v1.yaml `
+  --experiment-dir <experiment-directory> `
+  --output-dir <output-directory>
+
+python -m social_gnn.evaluate_information_retention `
+  --experiment-config configs/social_gnn_strict_baseline_6dim_v1.yaml `
+  --experiment-dir <experiment-directory> `
+  --validation-trial A4_C4 `
+  --test-trial A5_C5 `
+  --output-dir <output-directory>
+```
+
+The sensitivity evaluator preserves paired directed-edge structure, reports
+value and confidence perturbations separately, and normalizes displacement by
+the real latent RMS radius. The probe evaluator freezes the encoder, uses only
+trial-level splits, counts symmetric edge traits once, and reports both
+identity-ordered and permutation-invariant node retention. Neither evaluator
+modifies stored `SocialTrialPackage` files.
+
+The message-passing width and exported graph dimension can be controlled
+independently. Set `model.hidden_dim` for node/message capacity and
+`model.graph_dim` for the final `g_t` width. If `graph_dim` is omitted it
+defaults to `hidden_dim`, preserving compatibility with existing checkpoints.
+
+## Graph-level bottleneck SSL
+
+`graph_level_ssl.py` provides the no-bypass objective used by the preliminary
+downstream candidate. Its node and edge decoders receive only the exported
+`g_t`; they never receive pre-pooling node embeddings. For two animals with
+`D_node` channels, the invariant node target has `2 * D_node` channels: the
+feature-wise node means plus absolute differences. Edge targets contain
+symmetric edge traits once, and direction mean plus absolute asymmetry for
+directed traits. `D_node` is inferred from each loaded trial package, so the
+current 9D upstream latent and historical 6D packages use the same code path.
+Confidence remains a separate loss weight.
+
+The same module contains a capacity-comparable ordered MLP fusion baseline.
+It is deliberately retained as a strong diagnostic, but is not suitable as an
+identity-permutation-invariant social representation. `SocialV0` also accepts
+`readout: soft_role`, an experimental shared-scoring readout that is exactly
+invariant to exchanging both animal axes.
+
+Run the validation-selected graph-level mean configuration with:
+
+```powershell
+python -m social_gnn.experiment `
+  --config configs\social_gnn_selected_graph_mean_6dim_v1.yaml `
+  --device cuda:1
+```
+
+The selected local checkpoint and complete validation-only interpretation are
+recorded in `NEXT_PHASE_REPORT.md`. Information-retention summaries now write
+`validation_mean_r2` and `test_mean_r2` separately. Architecture selection
+must use the validation column; `A5_C5` is exploratory because it was already
+inspected in earlier development.
+
+## Downstream HMM/HSMM state discovery
+
+`social_gnn.downstream` extracts frozen patch-level `g_t` embeddings and fits
+continuous-observation diagonal Gaussian HMMs or genuine explicit-duration
+Gaussian HSMMs. Trials and invalid temporal runs remain independent, and bout
+seconds are derived from patch-center boundaries rather than by summing
+possibly overlapping source windows.
+
+```powershell
+python -m social_gnn.downstream --help
+```
+
+The reproducible command examples and time contract are documented in
+`downstream/README.md`. The initial model-selection results, encoder
+comparison, synthetic checks, selected checkpoint hashes, and scientific
+limitations are in `downstream/DOWNSTREAM_REPORT.md`.
+
+## Node-preserving SSL experiments
+
+`node_preservation_ssl.py` adds three patch-local, permutation-invariant
+encoders (social GNN, node-set branch, and fused dual branch), hybrid
+full-input/masked objectives, exact two-permutation node-set loss, and
+consistent joint node-edge matching. Every reconstruction decoder receives
+only final `g_t`; masked node branches receive the corrupted input.
+
+The controlled configurations are:
+
+- `social_gnn_node_preservation_b_pilot_6dim_v1.yaml`: preservation-weight pilot.
+- `social_gnn_node_preservation_c_6dim_v1.yaml`: social/node/dual ablation.
+- `social_gnn_node_preservation_d_6dim_v1.yaml`: unordered and joint set losses.
+
+Diagnostics are runnable as modules:
+
+```powershell
+python -m social_gnn.evaluate_node_stage_retention --help
+python -m social_gnn.evaluate_role_binding --help
+python -m social_gnn.evaluate_set_reconstruction --help
+python -m social_gnn.summarize_node_preservation --help
+```
+
+The frozen role-binding evaluator uses a small, predefined set of invariant
+cross-trait products and matched real observations. It does not treat these
+targets as behavioral labels. The results and selection rationale are in
+`NODE_PRESERVATION_REPORT.md`.

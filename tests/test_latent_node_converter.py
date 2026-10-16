@@ -190,6 +190,60 @@ class LatentNodeConverterTest(unittest.TestCase):
         self.assertEqual(package.node_features.shape, (2, 2, 2))
         self.assertEqual(package.edge_values.shape, (2, 2, 2, 8))
 
+    def test_authoritative_clock_is_preserved_with_missing_boundary_masks(self):
+        time = 1.12 + np.arange(8, dtype=np.float64) * 0.04
+        values = np.arange(8, dtype=np.float32)[:, None]
+        path_a = self._write_latent("clock_A", values, time=time)
+        path_b = self._write_latent("clock_B", values + 100.0, time=time)
+        clock_path = self.output_dir / "authoritative_clock.npz"
+        starts = np.asarray([0.96, 1.12, 1.28, 1.44], dtype=np.float64)
+        np.savez_compressed(
+            clock_path,
+            trial_id=np.asarray("authoritative"),
+            patch_start_s=starts,
+            patch_end_s=starts + 0.16,
+            social_step=np.arange(4, dtype=np.int64),
+            identity=np.asarray([1, 2]),
+            source_identity=np.asarray(["A", "B"]),
+        )
+        output = self.output_dir / "authoritative_nodes.npz"
+        summary = convert_aligned_latents_to_node_npz(
+            [("A", path_a), ("B", path_b)],
+            output,
+            trial_id="authoritative",
+            authoritative_clock_npz=clock_path,
+        )
+        with np.load(output, allow_pickle=False) as payload:
+            np.testing.assert_array_equal(payload["patch_start_s"], starts)
+            np.testing.assert_array_equal(payload["identity"], [1, 2])
+            self.assertEqual(
+                payload["node_mask"].tolist(),
+                [[False, False], [True, True], [True, True], [False, False]],
+            )
+            np.testing.assert_array_equal(payload["node_features"][[0, 3]], 0.0)
+        self.assertEqual(summary["qc"]["missing_patch_count_by_identity"], [2, 2])
+
+    def test_authoritative_clock_rejects_wrong_source_identity_order(self):
+        values = np.arange(8, dtype=np.float32)[:, None]
+        path_a = self._write_latent("order_A", values)
+        path_b = self._write_latent("order_B", values + 100.0)
+        clock_path = self.output_dir / "order_clock.npz"
+        np.savez_compressed(
+            clock_path,
+            trial_id=np.asarray("order"),
+            patch_start_s=np.asarray([0.96, 1.12]),
+            patch_end_s=np.asarray([1.12, 1.28]),
+            identity=np.asarray([1, 2]),
+            source_identity=np.asarray(["B", "A"]),
+        )
+        with self.assertRaisesRegex(LatentNodeConversionError, "source order"):
+            convert_aligned_latents_to_node_npz(
+                [("A", path_a), ("B", path_b)],
+                self.output_dir / "order_nodes.npz",
+                trial_id="order",
+                authoritative_clock_npz=clock_path,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

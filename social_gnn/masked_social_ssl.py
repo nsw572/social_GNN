@@ -25,6 +25,7 @@ class SocialMaskConfig:
     edge_mask_probability: float = 0.15
     node_modality_dropout: float = 0.0
     edge_modality_dropout: float = 0.0
+    couple_symmetric_traits: bool = False
     fill_value: float = 0.0
 
     def __post_init__(self) -> None:
@@ -129,7 +130,22 @@ def apply_social_masks(
     edge_target_mask = (
         _random_like(values, tuple(values.shape), generator)
         < config.edge_mask_probability
-    ) & pair_valid
+    )
+    if config.couple_symmetric_traits:
+        # These traits are exact reverse-edge duplicates by definition. Draw
+        # one decision per unordered pair and mirror it, otherwise the reverse
+        # edge is a trivial reconstruction answer.
+        upper = torch.triu(
+            torch.ones((n, n), dtype=torch.bool, device=nodes.device),
+            diagonal=1,
+        ).view(1, 1, n, n)
+        for trait in (0, 1, 4, 6, 7):
+            sampled = (
+                _random_like(values, (b, t, n, n), generator)
+                < config.edge_mask_probability
+            ) & upper
+            edge_target_mask[..., trait] = sampled | sampled.transpose(2, 3)
+    edge_target_mask &= pair_valid
     edge_modality_dropped = (
         _random_like(nodes, (b, t), generator) < config.edge_modality_dropout
     ) & time_mask & ~node_modality_dropped
@@ -171,14 +187,34 @@ class MaskedSocialSSL(nn.Module):
         hidden_dim: int = 64,
         layers: int = 2,
         decoder_hidden_dim: int | None = None,
+        readout: str = "mean",
+        number_of_nodes: int | None = None,
+        relational_match_head: bool = False,
+        graph_dim: int | None = None,
     ) -> None:
         super().__init__()
         decoder_hidden_dim = decoder_hidden_dim or hidden_dim
-        self.encoder = SocialV0(node_dim=node_dim, edge_dim=16, hidden_dim=hidden_dim, layers=layers)
+        graph_dim = hidden_dim if graph_dim is None else int(graph_dim)
+        self.encoder = SocialV0(
+            node_dim=node_dim,
+            edge_dim=16,
+            hidden_dim=hidden_dim,
+            layers=layers,
+            readout=readout,
+            number_of_nodes=number_of_nodes,
+            graph_dim=graph_dim,
+        )
         self.node_mask_token = nn.Parameter(torch.zeros(node_dim))
         nn.init.normal_(self.node_mask_token, std=0.02)
-        self.node_decoder = _mlp(hidden_dim * 2, decoder_hidden_dim, node_dim)
-        self.edge_decoder = _mlp(hidden_dim * 3, decoder_hidden_dim, 8)
+        self.node_decoder = _mlp(
+            hidden_dim + graph_dim, decoder_hidden_dim, node_dim
+        )
+        self.edge_decoder = _mlp(
+            hidden_dim * 2 + graph_dim, decoder_hidden_dim, 8
+        )
+        self.relation_classifier = (
+            nn.Linear(graph_dim, 1) if relational_match_head else None
+        )
 
     def forward(
         self,

@@ -27,17 +27,32 @@ from .data import (
     build_social_dataloader,
 )
 from .graph_builder import compose_edge_inputs
+from .graph_level_ssl import (
+    GraphLevelSocialSSL,
+    graph_level_reconstruction_loss,
+)
 from .masked_social_ssl import (
     MaskedSocialSSL,
     SocialMaskConfig,
     masked_social_reconstruction_loss,
+)
+from .node_preservation_ssl import (
+    FULL_ONLY_OBJECTIVES,
+    HYBRID_OBJECTIVES,
+    NEW_GRAPH_OBJECTIVES,
+    NodePreservingGraphSSL,
+    hybrid_reconstruction_loss,
+    node_preserving_reconstruction_loss,
+    objective_architecture,
 )
 from .vae import SocialPatchVAE, social_patch_vae_loss
 
 
 EXPERIMENT_VERSION = "social_gnn_experiment_v0"
 EDGE_MODES = frozenset({"full", "node_only", "shuffled"})
-OBJECTIVES = frozenset({"masked_ssl", "vae"})
+OBJECTIVES = frozenset(
+    {"masked_ssl", "graph_ssl", "mlp_graph_ssl", "vae"}
+) | NEW_GRAPH_OBJECTIVES
 
 
 @dataclass(frozen=True)
@@ -239,17 +254,34 @@ def _epoch(
     mask_config: SocialMaskConfig,
     node_loss_weight: float,
     edge_loss_weight: float,
+    preserve_loss_weight: float,
+    masked_loss_weight: float,
+    relational_match_weight: float,
     kl_beta: float,
     optimizer: torch.optim.Optimizer | None,
     gradient_clip_norm: float | None,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
+    graph_objective = objective in {"graph_ssl", "mlp_graph_ssl"}
+    node_preservation_objective = objective in NEW_GRAPH_OBJECTIVES
     metric_names = (
-        ("total", "node", "edge")
-        if objective == "masked_ssl"
+        ("total", "node", "edge", "relation")
+        if objective == "masked_ssl" and relational_match_weight > 0
+        else ("total", "node", "edge")
+        if objective == "masked_ssl" or graph_objective or objective in FULL_ONLY_OBJECTIVES
         else ("total", "reconstruction", "node", "edge", "kl")
     )
+    if objective in HYBRID_OBJECTIVES:
+        metric_names = (
+            "total",
+            "preserve",
+            "masked",
+            "node_full",
+            "edge_full",
+            "node_masked",
+            "edge_masked",
+        )
     totals = {name: 0.0 for name in metric_names}
     total_weight = 0
     edge_generator = torch.Generator().manual_seed(seed)
@@ -274,6 +306,96 @@ def _epoch(
                     node_weight=node_loss_weight,
                     edge_weight=edge_loss_weight,
                 )
+                if relational_match_weight > 0:
+                    if model.relation_classifier is None:
+                        raise ValueError(
+                            "relational_match_weight > 0 requires "
+                            "model.relational_match_head=true"
+                        )
+                    negative_values = batch["edge_values"].clone()
+                    negative_confidence = batch["edge_confidence"].clone()
+                    for batch_index, raw_length in enumerate(
+                        batch["sequence_length"].tolist()
+                    ):
+                        length = int(raw_length)
+                        permutation = torch.randperm(
+                            length, device=device, generator=mask_generator
+                        )
+                        negative_values[batch_index, :length] = batch[
+                            "edge_values"
+                        ][batch_index, :length].index_select(0, permutation)
+                        negative_confidence[batch_index, :length] = batch[
+                            "edge_confidence"
+                        ][batch_index, :length].index_select(0, permutation)
+                    real_g = model.encoder(
+                        batch["node_features"],
+                        compose_edge_inputs(
+                            batch["edge_values"], batch["edge_confidence"]
+                        ),
+                        node_mask=batch["node_mask"],
+                    )
+                    negative_g = model.encoder(
+                        batch["node_features"],
+                        compose_edge_inputs(
+                            negative_values, negative_confidence
+                        ),
+                        node_mask=batch["node_mask"],
+                    )
+                    real_logits = model.relation_classifier(real_g).squeeze(-1)
+                    negative_logits = model.relation_classifier(negative_g).squeeze(-1)
+                    valid_time = batch["time_mask"].bool()
+                    relation_loss = 0.5 * (
+                        torch.nn.functional.binary_cross_entropy_with_logits(
+                            real_logits[valid_time],
+                            torch.ones_like(real_logits[valid_time]),
+                        )
+                        + torch.nn.functional.binary_cross_entropy_with_logits(
+                            negative_logits[valid_time],
+                            torch.zeros_like(negative_logits[valid_time]),
+                        )
+                    )
+                    losses["relation"] = relation_loss
+                    losses["total"] = (
+                        losses["total"]
+                        + relational_match_weight * relation_loss
+                    )
+            elif graph_objective:
+                output = model(
+                    batch,
+                    mask_config=mask_config,
+                    generator=mask_generator,
+                )
+                losses = graph_level_reconstruction_loss(
+                    output,
+                    batch,
+                    node_weight=node_loss_weight,
+                    edge_weight=edge_loss_weight,
+                )
+            elif node_preservation_objective:
+                full_output = model(batch, view="full")
+                if objective in HYBRID_OBJECTIVES:
+                    masked_output = model(
+                        batch,
+                        view="masked",
+                        mask_config=mask_config,
+                        generator=mask_generator,
+                    )
+                    losses = hybrid_reconstruction_loss(
+                        masked_output,
+                        full_output,
+                        batch,
+                        preserve_weight=preserve_loss_weight,
+                        masked_weight=masked_loss_weight,
+                        node_weight=node_loss_weight,
+                        edge_weight=edge_loss_weight,
+                    )
+                else:
+                    losses = node_preserving_reconstruction_loss(
+                        full_output,
+                        batch,
+                        node_weight=node_loss_weight,
+                        edge_weight=edge_loss_weight,
+                    )
             else:
                 output = model(batch, sample=training)
                 losses = social_patch_vae_loss(output, batch, kl_beta=kl_beta)
@@ -401,6 +523,7 @@ def _mask_config(config: Mapping[str, Any]) -> SocialMaskConfig:
         edge_mask_probability=float(ssl.get("edge_mask_probability", 0.15)),
         node_modality_dropout=float(ssl.get("node_modality_dropout", 0.05)),
         edge_modality_dropout=float(ssl.get("edge_modality_dropout", 0.05)),
+        couple_symmetric_traits=bool(ssl.get("couple_symmetric_traits", False)),
     )
 
 
@@ -423,7 +546,42 @@ def _build_model(
         ),
     }
     if objective == "masked_ssl":
-        return MaskedSocialSSL(**common)
+        return MaskedSocialSSL(
+            **common,
+            readout=str(model_config.get("readout", "mean")),
+            number_of_nodes=number_of_nodes,
+            graph_dim=int(model_config.get("graph_dim", common["hidden_dim"])),
+            relational_match_head=bool(
+                model_config.get("relational_match_head", False)
+            ),
+        )
+    if objective in {"graph_ssl", "mlp_graph_ssl"}:
+        return GraphLevelSocialSSL(
+            node_dim=node_dim,
+            number_of_nodes=number_of_nodes,
+            hidden_dim=common["hidden_dim"],
+            graph_dim=int(model_config.get("graph_dim", common["hidden_dim"])),
+            layers=common["layers"],
+            decoder_hidden_dim=common["decoder_hidden_dim"],
+            readout=str(model_config.get("readout", "mean")),
+            backbone="mlp" if objective == "mlp_graph_ssl" else "gnn",
+            fusion_hidden_dim=int(model_config.get("fusion_hidden_dim", 192)),
+        )
+    if objective in NEW_GRAPH_OBJECTIVES:
+        architecture, target_mode = objective_architecture(objective)
+        return NodePreservingGraphSSL(
+            node_dim=node_dim,
+            number_of_nodes=number_of_nodes,
+            hidden_dim=common["hidden_dim"],
+            graph_dim=int(model_config.get("graph_dim", common["hidden_dim"])),
+            layers=common["layers"],
+            decoder_hidden_dim=common["decoder_hidden_dim"],
+            readout=str(model_config.get("readout", "mean")),
+            architecture=architecture,
+            target_mode=target_mode,
+            branch_hidden_dim=int(model_config.get("branch_hidden_dim", 32)),
+            fusion_hidden_dim=int(model_config.get("branch_fusion_hidden_dim", 64)),
+        )
     return SocialPatchVAE(
         **common,
         number_of_nodes=number_of_nodes,
@@ -486,8 +644,12 @@ def _export_embeddings(
                         edge_features,
                         node_mask=batch["node_mask"],
                     )
+                elif objective in {"graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES:
+                    embedding = model.encode_batch(batch)
                 else:
-                    embedding = model(batch, sample=False)["g_t"]
+                    # The deterministic VAE representation is its posterior
+                    # mean, not the pre-variational graph activation.
+                    embedding = model(batch, sample=False)["mu"]
                 length = int(batch["sequence_length"][0].item())
                 trial_id = str(batch["trial_id"][0])
                 path = split_dir / f"{trial_id}_g_t.npz"
@@ -497,6 +659,9 @@ def _export_embeddings(
                     trial_id=np.asarray(trial_id),
                     split=np.asarray(split),
                     objective=np.asarray(objective),
+                    representation=np.asarray(
+                        "mu" if objective == "vae" else "g_t"
+                    ),
                     edge_mode=np.asarray(edge_mode),
                     g_t=embedding[0, :length].detach().cpu().numpy().astype(np.float32),
                     patch_start_s=batch["patch_start_s"][0, :length].cpu().numpy(),
@@ -529,8 +694,8 @@ def _timestamped_directory(root: Path, prefix: str) -> Path:
     return candidate
 
 
-def _run_definitions(config: Mapping[str, Any]) -> list[dict[str, str]]:
-    runs = []
+def _run_definitions(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
     names: set[str] = set()
     for raw in config.get("runs", []):
         name = str(raw["name"]).strip()
@@ -543,7 +708,25 @@ def _run_definitions(config: Mapping[str, Any]) -> list[dict[str, str]]:
         if edge_mode not in EDGE_MODES:
             raise ValueError(f"edge_mode must be one of {sorted(EDGE_MODES)}")
         names.add(name)
-        runs.append({"name": name, "objective": objective, "edge_mode": edge_mode})
+        record: dict[str, Any] = {
+            "name": name,
+            "objective": objective,
+            "edge_mode": edge_mode,
+        }
+        if "selection_metric" in raw:
+            record["selection_metric"] = str(raw["selection_metric"])
+        for key in (
+            "node_loss_weight",
+            "edge_loss_weight",
+            "preserve_loss_weight",
+            "masked_loss_weight",
+        ):
+            if key in raw:
+                value = float(raw[key])
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError(f"{key} must be finite and nonnegative")
+                record[key] = value
+        runs.append(record)
     if not runs:
         raise ValueError("configuration contains no experiment runs")
     return runs
@@ -569,11 +752,12 @@ def run_experiment(
     config: Mapping[str, Any],
     *,
     device_override: str | None = None,
+    seed_override: int | None = None,
     smoke_test: bool = False,
 ) -> dict[str, Any]:
     """Validate inputs, run configured experiments, and export best ``g_t``."""
 
-    seed = int(config.get("seed", 0))
+    seed = int(config.get("seed", 0) if seed_override is None else seed_override)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -591,14 +775,39 @@ def run_experiment(
     if smoke_test:
         training = [packages[0]]
         validation = [packages[0]]
+        test: list[SocialTrialPackage] = []
     else:
-        validation_ids = config.get("split", {}).get("validation_trials", [])
-        training, validation = _split_packages(packages, validation_ids)
+        split_config = config.get("split", {})
+        validation_ids = [str(value) for value in split_config.get("validation_trials", [])]
+        test_ids = {str(value) for value in split_config.get("test_trials", [])}
+        excluded_ids = {str(value) for value in split_config.get("excluded_trials", [])}
+        overlap = (set(validation_ids) & test_ids) | (
+            (set(validation_ids) | test_ids) & excluded_ids
+        )
+        if overlap:
+            raise ValueError(
+                "validation, test, and excluded trial IDs overlap: "
+                f"{sorted(overlap)}"
+            )
+        available = {package.trial_id for package in packages}
+        unknown_held_out = sorted((test_ids | excluded_ids) - available)
+        if unknown_held_out:
+            raise ValueError(
+                f"test/excluded trials are missing or unknown: {unknown_held_out}"
+            )
+        test = [package for package in packages if package.trial_id in test_ids]
+        selectable = [
+            package
+            for package in packages
+            if package.trial_id not in test_ids | excluded_ids
+        ]
+        training, validation = _split_packages(selectable, validation_ids)
     normalizer = fit_feature_standardizer(
         training, epsilon=float(config.get("normalization", {}).get("epsilon", 1e-6))
     )
     normalized_training = [normalizer.transform(package) for package in training]
     normalized_validation = [normalizer.transform(package) for package in validation]
+    normalized_test = [normalizer.transform(package) for package in test]
     _write_json(session_dir / "normalization.json", normalizer.to_manifest())
 
     training_config = config.get("training", {})
@@ -626,6 +835,15 @@ def run_experiment(
         "missing_trials_skipped_for_smoke": missing,
         "training_trials": [p.trial_id for p in training],
         "validation_trials": [p.trial_id for p in validation],
+        "test_trials_held_out_from_training_and_selection": [p.trial_id for p in test],
+        "excluded_trials": (
+            []
+            if smoke_test
+            else sorted(
+                str(value)
+                for value in config.get("split", {}).get("excluded_trials", [])
+            )
+        ),
         "runs": [],
     }
     _write_json(session_dir / "manifest.json", manifest)
@@ -633,7 +851,11 @@ def run_experiment(
     for run in _run_definitions(config):
         run_dir = session_dir / run["name"]
         run_dir.mkdir()
-        run_seed = seed if run["objective"] == "masked_ssl" else seed + 1_000_000
+        run_seed = (
+            seed
+            if run["objective"] in {"masked_ssl", "graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES
+            else seed + 1_000_000
+        )
         # All masked edge ablations start from identical weights and use the
         # same trial order and target masks. Their only intended difference is
         # the edge input condition.
@@ -685,8 +907,13 @@ def run_experiment(
                 device=device,
                 seed=run_seed + epoch * 10,
                 mask_config=mask_config,
-                node_loss_weight=float(ssl_config.get("node_loss_weight", 1.0)),
-                edge_loss_weight=float(ssl_config.get("edge_loss_weight", 1.0)),
+                node_loss_weight=float(run.get("node_loss_weight", ssl_config.get("node_loss_weight", 1.0))),
+                edge_loss_weight=float(run.get("edge_loss_weight", ssl_config.get("edge_loss_weight", 1.0))),
+                preserve_loss_weight=float(run.get("preserve_loss_weight", ssl_config.get("preserve_loss_weight", 1.0))),
+                masked_loss_weight=float(run.get("masked_loss_weight", ssl_config.get("masked_loss_weight", 1.0))),
+                relational_match_weight=float(
+                    ssl_config.get("relational_match_weight", 0.0)
+                ),
                 kl_beta=float(vae_config.get("kl_beta", 1e-3)),
                 optimizer=optimizer,
                 gradient_clip_norm=(
@@ -703,8 +930,13 @@ def run_experiment(
                 device=device,
                 seed=run_seed + 9_000_000,
                 mask_config=mask_config,
-                node_loss_weight=float(ssl_config.get("node_loss_weight", 1.0)),
-                edge_loss_weight=float(ssl_config.get("edge_loss_weight", 1.0)),
+                node_loss_weight=float(run.get("node_loss_weight", ssl_config.get("node_loss_weight", 1.0))),
+                edge_loss_weight=float(run.get("edge_loss_weight", ssl_config.get("edge_loss_weight", 1.0))),
+                preserve_loss_weight=float(run.get("preserve_loss_weight", ssl_config.get("preserve_loss_weight", 1.0))),
+                masked_loss_weight=float(run.get("masked_loss_weight", ssl_config.get("masked_loss_weight", 1.0))),
+                relational_match_weight=float(
+                    ssl_config.get("relational_match_weight", 0.0)
+                ),
                 kl_beta=float(vae_config.get("kl_beta", 1e-3)),
                 optimizer=None,
                 gradient_clip_norm=None,
@@ -753,6 +985,7 @@ def run_experiment(
             packages_by_split={
                 "train": normalized_training,
                 "validation": normalized_validation,
+                **({"test": normalized_test} if normalized_test else {}),
             },
             edge_mode=run["edge_mode"],
             objective=run["objective"],
@@ -793,6 +1026,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--device", help="Override config device, e.g. cpu or cuda:1")
+    parser.add_argument("--seed", type=int, help="Override the configured random seed")
     parser.add_argument(
         "--smoke-test",
         action="store_true",
@@ -808,7 +1042,10 @@ def main() -> int:
     args = parse_args()
     config = load_experiment_config(args.config)
     manifest = run_experiment(
-        config, device_override=args.device, smoke_test=args.smoke_test
+        config,
+        device_override=args.device,
+        seed_override=args.seed,
+        smoke_test=args.smoke_test,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0

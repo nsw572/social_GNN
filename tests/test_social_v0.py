@@ -15,6 +15,39 @@ class _SelectAggregate(nn.Module):
 
 
 class SocialV0Test(unittest.TestCase):
+    def test_graph_dim_can_be_smaller_than_message_passing_width(self):
+        model = SocialV0(
+            node_dim=3,
+            edge_dim=16,
+            hidden_dim=8,
+            graph_dim=4,
+            layers=1,
+        )
+        nodes = torch.randn(2, 5, 2, 3)
+        edges = torch.randn(2, 5, 2, 2, 16)
+        graph, node_embeddings = model(
+            nodes, edges, return_node_embeddings=True
+        )
+        self.assertEqual(tuple(graph.shape), (2, 5, 4))
+        self.assertEqual(tuple(node_embeddings.shape), (2, 5, 2, 8))
+
+    def test_role_aware_readout_preserves_shape_and_order_sensitivity(self):
+        torch.manual_seed(4)
+        model = SocialV0(
+            node_dim=3,
+            edge_dim=16,
+            hidden_dim=8,
+            layers=1,
+            readout="role_aware",
+            number_of_nodes=2,
+        )
+        nodes = torch.randn(1, 3, 2, 3)
+        edges = torch.randn(1, 3, 2, 2, 16)
+        first = model(nodes, edges)
+        second = model(nodes.flip(2), edges.flip(2).flip(3))
+        self.assertEqual(tuple(first.shape), (1, 3, 8))
+        self.assertFalse(torch.allclose(first, second))
+
     def test_edge_value_and_coverage_aware_confidence_make_16_channels(self):
         values = torch.ones(2, 3, 2, 2, 8)
         confidence = torch.full_like(values, 0.5)

@@ -23,6 +23,69 @@ def _batch(batch_size=1, timesteps=3, nodes=2, node_dim=6):
 
 
 class MaskedSocialSSLTest(unittest.TestCase):
+    def test_masked_ssl_and_vae_accept_nine_dimensional_nodes(self):
+        batch = _batch(node_dim=9)
+        masked_model = MaskedSocialSSL(node_dim=9, hidden_dim=8, layers=1)
+        masked_output = masked_model(
+            batch,
+            mask_config=SocialMaskConfig(
+                node_mask_probability=1.0,
+                edge_mask_probability=1.0,
+            ),
+        )
+        self.assertEqual(tuple(masked_output["node_prediction"].shape), (1, 3, 2, 9))
+        masked_social_reconstruction_loss(masked_output, batch)["total"].backward()
+
+        vae_model = SocialPatchVAE(
+            node_dim=9,
+            number_of_nodes=2,
+            hidden_dim=8,
+            latent_dim=4,
+            layers=1,
+        )
+        vae_output = vae_model(batch)
+        self.assertEqual(tuple(vae_output["node_prediction"].shape), (1, 3, 2, 9))
+        social_patch_vae_loss(vae_output, batch, kl_beta=1e-3)["total"].backward()
+
+    def test_graph_bottleneck_updates_decoder_dimensions(self):
+        batch = _batch()
+        model = MaskedSocialSSL(
+            node_dim=6,
+            hidden_dim=8,
+            graph_dim=4,
+            layers=1,
+        )
+        outputs = model(
+            batch,
+            mask_config=SocialMaskConfig(
+                node_mask_probability=0.5,
+                edge_mask_probability=0.5,
+            ),
+        )
+        self.assertEqual(tuple(outputs["g_t"].shape), (1, 3, 4))
+        self.assertEqual(tuple(outputs["node_prediction"].shape), (1, 3, 2, 6))
+        self.assertEqual(tuple(outputs["edge_prediction"].shape), (1, 3, 2, 2, 8))
+        masked_social_reconstruction_loss(outputs, batch)["total"].backward()
+
+    def test_symmetric_trait_masks_are_coupled_when_enabled(self):
+        batch = _batch()
+        masked = apply_social_masks(
+            batch,
+            SocialMaskConfig(
+                node_mask_probability=0.0,
+                edge_mask_probability=0.5,
+                couple_symmetric_traits=True,
+            ),
+            generator=torch.Generator().manual_seed(23),
+        )
+        for trait in (0, 1, 4, 6, 7):
+            self.assertTrue(
+                torch.equal(
+                    masked.edge_target_mask[:, :, 0, 1, trait],
+                    masked.edge_target_mask[:, :, 1, 0, trait],
+                )
+            )
+
     def test_masking_does_not_mutate_targets_and_hides_confidence(self):
         batch = _batch()
         original_nodes = batch["node_features"].clone()

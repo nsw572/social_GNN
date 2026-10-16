@@ -44,7 +44,7 @@ videos:
       - {label: A5-6d, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A5_C5_A5-6d.csv'}
       - {label: C5-c8, csv: 'Y:\WSB\Computational_Ethology\processed_Data\Train\6channel_100Hz\A5_C5_C5-c8.csv'}
 
-output_root: 'C:\Users\DELL\Desktop\social_gnn_6dim_v0\video_features'
+output_root: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features'
 
 pipeline:
   parallel_branches: true

@@ -17,9 +17,9 @@ from typing import Any, Sequence
 import numpy as np
 
 try:
-    from .authoritative_clock import validate_fixed_patch_grid
+    from .authoritative_clock import load_node_clock, validate_fixed_patch_grid
 except ImportError:  # pragma: no cover - direct script execution
-    from authoritative_clock import validate_fixed_patch_grid
+    from authoritative_clock import load_node_clock, validate_fixed_patch_grid
 
 
 NODE_CONTRACT_VERSION = "social_node_features_v0"
@@ -296,6 +296,8 @@ def _aggregate_one_animal(
     interpolated_weight: float,
     minimum_weight_coverage: float,
     timestamp_tolerance_s: float,
+    sample_period_s: float,
+    permit_outside_source_support: bool,
     trial_id: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     patch_count = len(patch_start_s)
@@ -327,6 +329,17 @@ def _aggregate_one_animal(
         count = right - left
         sample_count[patch] = count
         if count != expected_samples:
+            source_start_s = float(loaded.time_s[0])
+            source_end_s = float(loaded.time_s[-1] + sample_period_s)
+            fully_inside_source_support = (
+                patch_start_s[patch] >= source_start_s - timestamp_tolerance_s
+                and patch_end_s[patch] <= source_end_s + timestamp_tolerance_s
+            )
+            if permit_outside_source_support and not fully_inside_source_support:
+                # An authoritative trial clock can legitimately extend beyond a
+                # newly delivered/cropped latent stream.  Keep that clock row,
+                # but make the missing node target explicit through node_mask.
+                continue
             raise _fail(
                 trial_id,
                 f"identity {loaded.identity!r} patch {patch} "
@@ -368,6 +381,7 @@ def convert_aligned_latents_to_node_npz(
     patch_stride_s: float = DEFAULT_PATCH_STRIDE_S,
     clock_start_s: float | None = None,
     clock_end_s: float | None = None,
+    authoritative_clock_npz: str | Path | None = None,
     interpolated_weight: float = 0.0,
     minimum_weight_coverage: float = 0.5,
     allow_duplicate_nodes: bool = False,
@@ -413,6 +427,70 @@ def convert_aligned_latents_to_node_npz(
     loaded, reference_time, sample_period_s, alignment_qc = _align_common_timebase(
         loaded, resolved_id
     )
+    reference_clock_meta: dict[str, Any] | None = None
+    reference_identity: np.ndarray | None = None
+    social_step: np.ndarray
+    if authoritative_clock_npz is not None:
+        if clock_start_s is not None or clock_end_s is not None:
+            raise _fail(
+                resolved_id,
+                "clock_start_s/clock_end_s cannot be combined with "
+                "authoritative_clock_npz",
+            )
+        try:
+            social_step, patch_start_s, patch_end_s, reference_clock_meta = (
+                load_node_clock(authoritative_clock_npz)
+            )
+        except ValueError as exc:
+            raise _fail(resolved_id, str(exc)) from exc
+        if reference_clock_meta["trial_id"] != resolved_id:
+            raise _fail(
+                resolved_id,
+                "authoritative clock trial_id "
+                f"{reference_clock_meta['trial_id']!r} does not match",
+            )
+        patch_duration_s = float(reference_clock_meta["patch_duration_s"])
+        patch_stride_meta = reference_clock_meta["patch_stride_s"]
+        patch_stride_s = (
+            float(patch_stride_meta)
+            if patch_stride_meta is not None
+            else float(patch_duration_s)
+        )
+        try:
+            with np.load(authoritative_clock_npz, allow_pickle=False) as reference:
+                if "identity" in reference.files:
+                    reference_identity = np.array(reference["identity"], copy=True)
+                if "source_identity" in reference.files:
+                    expected_source_identity = [
+                        str(item) for item in np.asarray(reference["source_identity"])
+                    ]
+                    if expected_source_identity != source_identities:
+                        raise _fail(
+                            resolved_id,
+                            "latent source order does not match authoritative "
+                            f"source_identity: got {source_identities}, expected "
+                            f"{expected_source_identity}",
+                        )
+        except LatentNodeConversionError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise _fail(
+                resolved_id,
+                f"could not inspect authoritative clock identity: {exc}",
+            ) from exc
+    else:
+        patch_start_s, patch_end_s = _fixed_clock(
+            first_sample_s=float(reference_time[0]),
+            last_sample_s=float(reference_time[-1]),
+            sample_period_s=sample_period_s,
+            patch_duration_s=float(patch_duration_s),
+            patch_stride_s=float(patch_stride_s),
+            clock_start_s=clock_start_s,
+            clock_end_s=clock_end_s,
+            trial_id=resolved_id,
+        )
+        social_step = np.arange(len(patch_start_s), dtype=np.int64)
+
     samples_per_patch_float = patch_duration_s / sample_period_s
     expected_samples = int(round(samples_per_patch_float))
     if expected_samples < 1 or not np.isclose(
@@ -424,16 +502,6 @@ def convert_aligned_latents_to_node_npz(
             f"latent sample period {sample_period_s}",
         )
 
-    patch_start_s, patch_end_s = _fixed_clock(
-        first_sample_s=float(reference_time[0]),
-        last_sample_s=float(reference_time[-1]),
-        sample_period_s=sample_period_s,
-        patch_duration_s=float(patch_duration_s),
-        patch_stride_s=float(patch_stride_s),
-        clock_start_s=clock_start_s,
-        clock_end_s=clock_end_s,
-        trial_id=resolved_id,
-    )
     timestamp_tolerance_s = float(alignment_qc["timestamp_tolerance_s"])
     first_used = int(
         np.searchsorted(
@@ -469,6 +537,8 @@ def convert_aligned_latents_to_node_npz(
             interpolated_weight=interpolated_weight,
             minimum_weight_coverage=minimum_weight_coverage,
             timestamp_tolerance_s=timestamp_tolerance_s,
+            sample_period_s=sample_period_s,
+            permit_outside_source_support=authoritative_clock_npz is not None,
             trial_id=resolved_id,
         )
         node_features.append(features)
@@ -503,7 +573,13 @@ def convert_aligned_latents_to_node_npz(
         )
 
     labels = (
-        list(output_identity) if output_identity is not None else source_identities
+        list(output_identity)
+        if output_identity is not None
+        else (
+            reference_identity.tolist()
+            if reference_identity is not None
+            else source_identities
+        )
     )
     if len(labels) != len(loaded) or len({str(item) for item in labels}) != len(labels):
         raise _fail(
@@ -523,7 +599,7 @@ def convert_aligned_latents_to_node_npz(
         patch_end_s=patch_end_s,
         identity=identity_array,
         source_identity=np.asarray(source_identities),
-        social_step=np.arange(len(patch_start_s), dtype=np.int64),
+        social_step=social_step,
         node_weight_coverage=node_coverage_array,
         node_interp_fraction=interp_fraction_array,
         node_sample_count=sample_count_array,
@@ -532,6 +608,11 @@ def convert_aligned_latents_to_node_npz(
         interpolated_weight=np.asarray(interpolated_weight),
         minimum_weight_coverage=np.asarray(minimum_weight_coverage),
         training_eligible=np.asarray(not duplicate_pairs),
+        authoritative_clock_npz=np.asarray(
+            ""
+            if authoritative_clock_npz is None
+            else str(Path(authoritative_clock_npz).resolve())
+        ),
     )
 
     summary_path = (
@@ -551,6 +632,21 @@ def convert_aligned_latents_to_node_npz(
         "source_latent_file": [str(item.path.resolve()) for item in loaded],
         "shape": list(node_feature_array.shape),
         "clock": {
+            "mode": (
+                "authoritative_node_intervals"
+                if authoritative_clock_npz is not None
+                else "generated_from_latent_support"
+            ),
+            "source_node_npz": (
+                None
+                if authoritative_clock_npz is None
+                else str(Path(authoritative_clock_npz).resolve())
+            ),
+            "source_clock_sha256": (
+                None
+                if reference_clock_meta is None
+                else reference_clock_meta["clock_sha256"]
+            ),
             "patch_count": int(len(patch_start_s)),
             "patch_start_s": float(patch_start_s[0]),
             "patch_end_s": float(patch_end_s[-1]),
@@ -574,6 +670,9 @@ def convert_aligned_latents_to_node_npz(
             "mean_weight_coverage_by_identity": node_coverage_array.mean(axis=0)
             .astype(float)
             .tolist(),
+            "missing_patch_count_by_identity": (
+                sample_count_array != expected_samples
+            ).sum(axis=0).astype(int).tolist(),
         },
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -618,6 +717,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-stride-s", type=float, default=DEFAULT_PATCH_STRIDE_S)
     parser.add_argument("--clock-start-s", type=float)
     parser.add_argument("--clock-end-s", type=float)
+    parser.add_argument(
+        "--authoritative-clock-npz",
+        type=Path,
+        help=(
+            "Existing canonical node NPZ whose complete patch clock and identity "
+            "order must be preserved. Patches outside latent support remain in "
+            "the output with node_mask=false."
+        ),
+    )
     parser.add_argument("--interpolated-weight", type=float, default=0.0)
     parser.add_argument("--minimum-weight-coverage", type=float, default=0.5)
     parser.add_argument("--allow-duplicate-nodes", action="store_true")
@@ -637,6 +745,7 @@ def main() -> int:
             patch_stride_s=args.patch_stride_s,
             clock_start_s=args.clock_start_s,
             clock_end_s=args.clock_end_s,
+            authoritative_clock_npz=args.authoritative_clock_npz,
             interpolated_weight=args.interpolated_weight,
             minimum_weight_coverage=args.minimum_weight_coverage,
             allow_duplicate_nodes=args.allow_duplicate_nodes,
