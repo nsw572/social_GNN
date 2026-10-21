@@ -351,22 +351,8 @@ def evaluate_information_retention(
             number_of_nodes=number_of_nodes,
             device=device,
             name=name,
-            vae_config=config.get("vae", {}),
         )
         encoders.append(loaded)
-        if loaded.objective == "vae":
-            encoders.append(
-                load_encoder(
-                    path,
-                    model_config=model_config,
-                    node_dim=node_dim,
-                    number_of_nodes=number_of_nodes,
-                    device=device,
-                    name=f"{name}_pre_vae_g_t",
-                    vae_config=config.get("vae", {}),
-                    representation="g_t",
-                )
-            )
     if include_random:
         for random_index in range(random_control_count):
             encoders.append(
@@ -378,7 +364,6 @@ def evaluate_information_retention(
                     device=device,
                     seed=seed + random_index * 10_007,
                     name=f"random_untrained_seed_{random_index}",
-                    vae_config=config.get("vae", {}),
                 )
             )
 

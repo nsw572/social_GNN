@@ -1,5 +1,8 @@
 # Social-GNN V0
 
+第一次接触本项目时，建议先阅读中文入门文档
+[NOOBS_GUIDE.md](NOOBS_GUIDE.md)。
+
 Social-V0 operates on animal-level graphs, not body-part graphs. It accepts
 continuous IMU latents from the upstream encoder and video-derived directed
 relational features.
@@ -44,11 +47,6 @@ reconstructs hidden node latent values and eight hidden edge values; edge loss
 uses the stored per-trait confidence as a weight without multiplying it into
 the target value.
 
-The parallel `vae.py` path is a patch-level VAE self-reconstruction baseline.
-It reconstructs all node and edge values and adds a configurable KL term. It
-also has no temporal encoder. The two objectives are separate experiments, not
-two losses that must be enabled together.
-
 Example:
 
 ```python
@@ -63,10 +61,9 @@ output = model(batch, mask_config=SocialMaskConfig(node_mask_probability=0.15))
 loss = masked_social_reconstruction_loss(output, batch)["total"]
 ```
 
-For an actual epoch, use `train_masked_social_ssl_epoch` or the independent
-`train_social_patch_vae_epoch` helper with the existing full-trial DataLoader.
-The DataLoader still shuffles only whole trials; no helper concatenates time
-across trial boundaries.
+For an actual epoch, use `train_masked_social_ssl_epoch` with the existing
+full-trial DataLoader. The DataLoader still shuffles only whole trials; no
+helper concatenates time across trial boundaries.
 
 ## Reproducible experiment runner
 
@@ -98,9 +95,9 @@ python -m social_gnn.experiment `
 ```
 
 The default experiment compares masked SSL with full edges, node-only input,
-and edges shuffled over time within each trial, plus an independent full-edge
-patch VAE. The three masked runs start from identical weights and use identical
-mask schedules, so their edge condition is the intended difference. Outputs
+and edges shuffled over time within each trial. The three runs start from
+identical weights and use identical mask schedules, so their edge condition is
+the intended difference. Outputs
 go to a new timestamped directory and include train-only normalization
 statistics, per-epoch JSONL metrics, best/last checkpoints, and one
 clock-preserving `g_t` NPZ per trial and split. No run overwrites source files
@@ -555,3 +552,18 @@ The frozen role-binding evaluator uses a small, predefined set of invariant
 cross-trait products and matched real observations. It does not treat these
 targets as behavioral labels. The results and selection rationale are in
 `NODE_PRESERVATION_REPORT.md`.
+
+## 9D full GNN benchmark
+
+`configs/social_gnn_full_benchmark_9dim_v1.yaml` repeats the complete
+non-redundant GNN/SSL ablation matrix on the aligned 9D upstream latent. It
+contains 21 conditions, including real-edge controls, a 32D graph bottleneck,
+graph-only/full and hybrid reconstruction, node-set targets, dual branches,
+and role-aware diagnostics. The VAE objective is no longer part of the active
+pipeline or public API.
+
+The three-seed frozen-probe, role-binding, and representation-geometry results
+are documented in `GNN_9DIM_FULL_BENCHMARK_REPORT.md`. The current balanced
+retention winner is `graph_full`; `graph_hybrid_p2` remains the masked-input
+robustness candidate. These are validation diagnostics, not a substitute for
+independent downstream behavioral-state evaluation.

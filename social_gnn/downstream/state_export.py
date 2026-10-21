@@ -23,6 +23,7 @@ from .evaluation import (
 )
 from .gaussian_hmm import GaussianHMM
 from .gaussian_hsmm import GaussianHSMM
+from .independent import GaussianMixtureStateModel, KMeansStateModel
 from .preprocessing import EmbeddingPreprocessor
 from .visualization import save_diagnostic_plots
 
@@ -34,6 +35,10 @@ def load_temporal_model(path: str | Path):
         return GaussianHMM.load(path)
     if model_type == "gaussian_hsmm_v1":
         return GaussianHSMM.load(path)
+    if model_type == "kmeans_state_v1":
+        return KMeansStateModel.load(path)
+    if model_type == "diagonal_gmm_state_v1":
+        return GaussianMixtureStateModel.load(path)
     raise ValueError(f"unsupported temporal checkpoint type {model_type!r}")
 
 

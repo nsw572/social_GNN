@@ -8,7 +8,6 @@ from social_gnn.masked_social_ssl import (
     apply_social_masks,
     masked_social_reconstruction_loss,
 )
-from social_gnn.vae import SocialPatchVAE, social_patch_vae_loss
 
 
 def _batch(batch_size=1, timesteps=3, nodes=2, node_dim=6):
@@ -23,7 +22,7 @@ def _batch(batch_size=1, timesteps=3, nodes=2, node_dim=6):
 
 
 class MaskedSocialSSLTest(unittest.TestCase):
-    def test_masked_ssl_and_vae_accept_nine_dimensional_nodes(self):
+    def test_masked_ssl_accepts_nine_dimensional_nodes(self):
         batch = _batch(node_dim=9)
         masked_model = MaskedSocialSSL(node_dim=9, hidden_dim=8, layers=1)
         masked_output = masked_model(
@@ -36,16 +35,6 @@ class MaskedSocialSSLTest(unittest.TestCase):
         self.assertEqual(tuple(masked_output["node_prediction"].shape), (1, 3, 2, 9))
         masked_social_reconstruction_loss(masked_output, batch)["total"].backward()
 
-        vae_model = SocialPatchVAE(
-            node_dim=9,
-            number_of_nodes=2,
-            hidden_dim=8,
-            latent_dim=4,
-            layers=1,
-        )
-        vae_output = vae_model(batch)
-        self.assertEqual(tuple(vae_output["node_prediction"].shape), (1, 3, 2, 9))
-        social_patch_vae_loss(vae_output, batch, kl_beta=1e-3)["total"].backward()
 
     def test_graph_bottleneck_updates_decoder_dimensions(self):
         batch = _batch()
@@ -156,20 +145,6 @@ class MaskedSocialSSLTest(unittest.TestCase):
         losses = masked_social_reconstruction_loss(outputs, batch)
         self.assertTrue(torch.isfinite(losses["total"]))
         losses["total"].backward()
-
-    def test_vae_parallel_baseline_is_patch_local(self):
-        batch = _batch()
-        model = SocialPatchVAE(
-            node_dim=6, number_of_nodes=2, hidden_dim=8, latent_dim=4, layers=1
-        )
-        outputs = model(batch)
-        self.assertEqual(tuple(outputs["mu"].shape), (1, 3, 4))
-        self.assertEqual(tuple(outputs["node_prediction"].shape), (1, 3, 2, 6))
-        self.assertEqual(tuple(outputs["edge_prediction"].shape), (1, 3, 2, 2, 8))
-        losses = social_patch_vae_loss(outputs, batch, kl_beta=1e-3)
-        self.assertTrue(torch.isfinite(losses["total"]))
-        losses["total"].backward()
-
 
 if __name__ == "__main__":
     unittest.main()

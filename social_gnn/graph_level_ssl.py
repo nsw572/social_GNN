@@ -185,6 +185,127 @@ class MLPFusionEncoder(nn.Module):
         return graph
 
 
+def swap_two_animal_graph(
+    node_features: torch.Tensor,
+    edge_features: torch.Tensor,
+    node_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Apply one consistent two-animal swap to nodes, edges, and validity."""
+
+    if node_features.ndim != 4 or node_features.shape[2] != 2:
+        raise ValueError("node_features must have shape [B,T,2,D]")
+    if edge_features.ndim != 5 or edge_features.shape[2:4] != (2, 2):
+        raise ValueError("edge_features must have shape [B,T,2,2,F]")
+    if node_mask is not None and node_mask.shape != node_features.shape[:3]:
+        raise ValueError("node_mask must have shape [B,T,2]")
+    index = torch.as_tensor((1, 0), dtype=torch.long, device=node_features.device)
+    swapped_nodes = node_features.index_select(2, index)
+    swapped_edges = edge_features.index_select(2, index).index_select(3, index)
+    swapped_mask = None if node_mask is None else node_mask.index_select(2, index)
+    return swapped_nodes, swapped_edges, swapped_mask
+
+
+class SymmetrizedMLPFusionEncoder(nn.Module):
+    """Exact permutation-invariant, non-message-passing two-animal baseline.
+
+    One shared ordered MLP evaluates the original graph and a consistently
+    swapped graph. Their average is invariant to exchanging both animal axes.
+    Only off-diagonal social edges are flattened; self edges are excluded.
+    Node and pair-validity masks are explicit inputs, while per-trait edge
+    confidence remains in ``edge_features``.
+    """
+
+    def __init__(
+        self,
+        *,
+        node_dim: int,
+        number_of_nodes: int,
+        edge_dim: int,
+        graph_dim: int,
+        fusion_hidden_dim: int = 160,
+    ) -> None:
+        super().__init__()
+        if number_of_nodes != 2:
+            raise ValueError("symmetrized MLP baseline requires N=2")
+        self.number_of_nodes = int(number_of_nodes)
+        self.graph_dim = int(graph_dim)
+        self.node_dim = int(node_dim)
+        self.edge_dim = int(edge_dim)
+        input_dim = 2 * self.node_dim + 2 + 2 * self.edge_dim + 2
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, fusion_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_hidden_dim, fusion_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_hidden_dim, self.graph_dim),
+        )
+
+    def _ordered_inputs(
+        self,
+        node_features: torch.Tensor,
+        edge_features: torch.Tensor,
+        node_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if node_features.ndim != 4 or node_features.shape[2] != 2:
+            raise ValueError("symmetrized MLP expects nodes [B,T,2,D]")
+        if edge_features.ndim != 5 or edge_features.shape[2:4] != (2, 2):
+            raise ValueError("symmetrized MLP expects edges [B,T,2,2,F]")
+        if node_features.shape[-1] != self.node_dim:
+            raise ValueError(
+                f"expected node dimension {self.node_dim}, got {node_features.shape[-1]}"
+            )
+        if edge_features.shape[-1] != self.edge_dim:
+            raise ValueError(
+                f"expected edge dimension {self.edge_dim}, got {edge_features.shape[-1]}"
+            )
+        if node_mask is None:
+            mask = torch.ones(
+                node_features.shape[:3],
+                dtype=torch.bool,
+                device=node_features.device,
+            )
+        else:
+            if node_mask.shape != node_features.shape[:3]:
+                raise ValueError("node_mask must have shape [B,T,2]")
+            mask = node_mask.bool()
+        nodes = node_features * mask.to(dtype=node_features.dtype).unsqueeze(-1)
+        directed_edges = torch.cat(
+            (edge_features[:, :, 0, 1], edge_features[:, :, 1, 0]), dim=-1
+        )
+        pair_valid = mask.all(dim=2, keepdim=True).to(dtype=node_features.dtype)
+        directed_valid = pair_valid.expand(-1, -1, 2)
+        directed_edges = directed_edges * pair_valid.repeat(
+            1, 1, 2 * self.edge_dim
+        )
+        return torch.cat(
+            (
+                nodes.flatten(2),
+                mask.to(dtype=node_features.dtype),
+                directed_edges,
+                directed_valid,
+            ),
+            dim=-1,
+        )
+
+    def forward(
+        self,
+        node_features: torch.Tensor,
+        edge_features: torch.Tensor,
+        node_mask: torch.Tensor | None = None,
+        *,
+        return_node_embeddings: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, None]:
+        original = self._ordered_inputs(node_features, edge_features, node_mask)
+        swapped_nodes, swapped_edges, swapped_mask = swap_two_animal_graph(
+            node_features, edge_features, node_mask
+        )
+        swapped = self._ordered_inputs(swapped_nodes, swapped_edges, swapped_mask)
+        graph = 0.5 * (self.network(original) + self.network(swapped))
+        if return_node_embeddings:
+            return graph, None
+        return graph
+
+
 class GraphLevelSocialSSL(nn.Module):
     """Masked SSL whose decoders receive only the final graph bottleneck."""
 

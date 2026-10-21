@@ -1,0 +1,55 @@
+version: social_gnn_downstream_benchmark_v1
+output_root: evaluation_runs/gnn_9dim_downstream_v1
+experiment_config: configs/social_gnn_invariant_mlp_9dim_v1.yaml
+
+data_protocol:
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  validation_trials: [A4_C4]
+  excluded_trials: [A5_C5]
+  validation_warning: A4_C4 was used for encoder checkpoint selection and is not an untouched test trial.
+  independent_test_trials: []
+
+preprocessing:
+  standardize_on_training_trials_only: true
+  pca_dim: 16
+  pca_fit_on_training_trials_only: true
+
+search:
+  state_counts: [4, 6, 8, 10, 12]
+  hsmm_max_duration_patches: [25, 50, 100]
+  screening_encoder_seed: 20261013
+  screening_downstream_seeds: [0]
+  confirmation_encoder_seeds: [20261013, 20261029, 20261107]
+  confirmation_downstream_seeds: [0, 1, 2]
+  covariance_floor: 0.001
+  tolerance: 0.0001
+  gmm_max_iter: 100
+  hmm_max_iter: 40
+  hsmm_screening_max_iter: 8
+  hsmm_confirmation_max_iter: 20
+
+representations:
+  graph_full:
+    architecture: GINE Social-GNN
+    objective: full reconstruction
+    embeddings: evaluation_runs/gnn_9dim_downstream_v1/embeddings/graph_full/seed_{seed}
+  graph_hybrid_p2:
+    architecture: GINE Social-GNN
+    objective: full plus masked reconstruction, preservation weight 2
+    embeddings: evaluation_runs/gnn_9dim_downstream_v1/embeddings/graph_hybrid_p2/seed_{seed}
+  invariant_mlp_full:
+    architecture: exact two-animal symmetrized MLP
+    objective: full reconstruction
+    embeddings: evaluation_runs/gnn_9dim_downstream_v1/embeddings/invariant_mlp_full/seed_{seed}
+  invariant_mlp_hybrid_p2:
+    architecture: exact two-animal symmetrized MLP
+    objective: full plus masked reconstruction, preservation weight 2
+    embeddings: evaluation_runs/gnn_9dim_downstream_v1/embeddings/invariant_mlp_hybrid_p2/seed_{seed}
+
+scientific_constraints:
+  - Never bridge trial boundaries or invalid clock gaps.
+  - Do not fit scaling or PCA on A4_C4 or A5_C5.
+  - Compare density likelihoods only within one fixed representation and preprocessing space.
+  - Treat ARI and geometric separation as partition diagnostics, not behavioral accuracy.
+  - State numbers receive no automatic behavioral names.
+  - Stop before Interpreter development.

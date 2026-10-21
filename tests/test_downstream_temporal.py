@@ -57,6 +57,32 @@ class DownstreamTemporalTest(unittest.TestCase):
         self.assertEqual([value.tolist() for value in indices], [[0, 1], [3, 4, 5], [7, 8, 9]])
         np.testing.assert_array_equal(sequences[1], trial.graph_embeddings[[3, 4, 5]])
 
+    def test_embedding_confidence_metadata_checkpoint_roundtrip(self):
+        trial = make_trial()
+        enriched = FrozenEmbeddingTrial(
+            trial_id=trial.trial_id,
+            graph_embeddings=trial.graph_embeddings,
+            patch_start_s=trial.patch_start_s,
+            patch_end_s=trial.patch_end_s,
+            valid_time_mask=trial.valid_time_mask,
+            encoder_checkpoint=trial.encoder_checkpoint,
+            encoder_config=trial.encoder_config,
+            node_valid_fraction=np.linspace(0.5, 1.0, 10, dtype=np.float32),
+            edge_confidence_mean=np.full((10, 8), 0.75, dtype=np.float32),
+        )
+        directory = Path("social_gnn") / f"_test_downstream_{uuid.uuid4().hex}"
+        directory.mkdir(parents=True)
+        try:
+            restored = FrozenEmbeddingTrial.load(enriched.save(directory / "embedding.npz"))
+            np.testing.assert_array_equal(
+                restored.node_valid_fraction, enriched.node_valid_fraction
+            )
+            np.testing.assert_array_equal(
+                restored.edge_confidence_mean, enriched.edge_confidence_mean
+            )
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
     def test_train_only_preprocessing(self):
         train = make_trial("train", np.asarray([[0.0, 2.0], [2.0, 4.0], [4.0, 6.0]]))
         validation = make_trial("validation", np.full((3, 2), 1000.0))

@@ -78,10 +78,10 @@ def summarize(
     for value in role_models:
         label, model, path = _spec(value)
         role_by_label[label].append((model, path))
-    geometry_by_label: dict[str, tuple[str, Path]] = {}
+    geometry_by_label: dict[str, list[tuple[str, Path]]] = defaultdict(list)
     for value in geometry_specs:
         label, model, path = _spec(value)
-        geometry_by_label[label] = (model, path)
+        geometry_by_label[label].append((model, path))
 
     rows: list[dict[str, Any]] = []
     for label, seed_records in records.items():
@@ -119,17 +119,44 @@ def summarize(
             row["mean_role_binding_r2"] = np.nan
             row["mean_role_binding_r2_sd"] = np.nan
         if label in geometry_by_label:
-            geometry_model, geometry_path = geometry_by_label[label]
-            geometry_rows = [
-                item for item in _read(geometry_path)
-                if item.get("model") == geometry_model and item.get("trial_id") == "A4_C4"
-            ]
-            if geometry_rows:
-                item = geometry_rows[0]
-                row["parameter_count"] = int(item["parameter_count"])
-                row["total_embedding_variance"] = float(item["total_variance"])
-                row["effective_rank"] = float(item["entropy_effective_rank"])
-                row["permutation_error"] = float(item["mean_permutation_error"])
+            geometry_records: list[dict[str, str]] = []
+            for geometry_model, geometry_path in geometry_by_label[label]:
+                matches = [
+                    item
+                    for item in _read(geometry_path)
+                    if item.get("model") == geometry_model
+                    and item.get("trial_id") == "A4_C4"
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"expected one A4_C4 geometry row for {geometry_model!r} "
+                        f"in {geometry_path}, found {len(matches)}"
+                    )
+                geometry_records.append(matches[0])
+            parameter_counts = {
+                int(item["parameter_count"]) for item in geometry_records
+            }
+            if len(parameter_counts) != 1:
+                raise ValueError(
+                    f"geometry parameter counts differ across seeds for {label!r}: "
+                    f"{sorted(parameter_counts)}"
+                )
+            row["parameter_count"] = parameter_counts.pop()
+            for output_name, source_name in (
+                ("total_embedding_variance", "total_variance"),
+                ("effective_rank", "entropy_effective_rank"),
+                ("permutation_error", "mean_permutation_error"),
+            ):
+                values = np.asarray(
+                    [float(item[source_name]) for item in geometry_records],
+                    dtype=np.float64,
+                )
+                row[output_name] = float(np.nanmean(values))
+                row[f"{output_name}_sd"] = (
+                    float(np.nanstd(values, ddof=1))
+                    if len(values) > 1
+                    else np.nan
+                )
         rows.append(row)
 
     output = Path(output_dir)

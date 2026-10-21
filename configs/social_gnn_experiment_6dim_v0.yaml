@@ -45,10 +45,6 @@ ssl:
   node_loss_weight: 1.0
   edge_loss_weight: 1.0
 
-vae:
-  latent_dim: 32
-  kl_beta: 0.001
-
 training:
   epochs: 100
   batch_size: 1
@@ -58,7 +54,7 @@ training:
   gradient_clip_norm: 5.0
 
 # Primary comparison: validation node-reconstruction loss for the three masked
-# SSL runs. The VAE is an independent self-reconstruction baseline.
+# SSL edge-input conditions.
 runs:
   - name: masked_full_edges
     objective: masked_ssl
@@ -69,6 +65,3 @@ runs:
   - name: masked_shuffled_edges
     objective: masked_ssl
     edge_mode: shuffled
-  - name: vae_full_edges
-    objective: vae
-    edge_mode: full

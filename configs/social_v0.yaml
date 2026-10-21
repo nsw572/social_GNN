@@ -22,7 +22,3 @@ ssl:
   edge_modality_dropout: 0.05
   node_loss_weight: 1.0
   edge_loss_weight: 1.0
-parallel_vae:
-  enabled: false
-  latent_dim: 32
-  kl_beta: 0.001

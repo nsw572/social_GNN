@@ -45,14 +45,9 @@ from .node_preservation_ssl import (
     node_preserving_reconstruction_loss,
     objective_architecture,
 )
-from .vae import SocialPatchVAE, social_patch_vae_loss
-
-
 EXPERIMENT_VERSION = "social_gnn_experiment_v0"
 EDGE_MODES = frozenset({"full", "node_only", "shuffled"})
-OBJECTIVES = frozenset(
-    {"masked_ssl", "graph_ssl", "mlp_graph_ssl", "vae"}
-) | NEW_GRAPH_OBJECTIVES
+OBJECTIVES = frozenset({"masked_ssl", "graph_ssl", "mlp_graph_ssl"}) | NEW_GRAPH_OBJECTIVES
 
 
 @dataclass(frozen=True)
@@ -257,7 +252,6 @@ def _epoch(
     preserve_loss_weight: float,
     masked_loss_weight: float,
     relational_match_weight: float,
-    kl_beta: float,
     optimizer: torch.optim.Optimizer | None,
     gradient_clip_norm: float | None,
 ) -> dict[str, float]:
@@ -265,12 +259,10 @@ def _epoch(
     model.train(training)
     graph_objective = objective in {"graph_ssl", "mlp_graph_ssl"}
     node_preservation_objective = objective in NEW_GRAPH_OBJECTIVES
-    metric_names = (
+    metric_names: tuple[str, ...] = (
         ("total", "node", "edge", "relation")
         if objective == "masked_ssl" and relational_match_weight > 0
         else ("total", "node", "edge")
-        if objective == "masked_ssl" or graph_objective or objective in FULL_ONLY_OBJECTIVES
-        else ("total", "reconstruction", "node", "edge", "kl")
     )
     if objective in HYBRID_OBJECTIVES:
         metric_names = (
@@ -396,9 +388,8 @@ def _epoch(
                         node_weight=node_loss_weight,
                         edge_weight=edge_loss_weight,
                     )
-            else:
-                output = model(batch, sample=training)
-                losses = social_patch_vae_loss(output, batch, kl_beta=kl_beta)
+            else:  # pragma: no cover - guarded by objective validation
+                raise RuntimeError(f"unsupported GNN objective {objective!r}")
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 losses["total"].backward()
@@ -516,8 +507,10 @@ def _split_packages(
     return training, validation
 
 
-def _mask_config(config: Mapping[str, Any]) -> SocialMaskConfig:
-    ssl = config.get("ssl", {})
+def _mask_config(
+    config: Mapping[str, Any], override: Mapping[str, Any] | None = None
+) -> SocialMaskConfig:
+    ssl = {**config.get("ssl", {}), **(override or {})}
     return SocialMaskConfig(
         node_mask_probability=float(ssl.get("node_mask_probability", 0.15)),
         edge_mask_probability=float(ssl.get("edge_mask_probability", 0.15)),
@@ -533,7 +526,6 @@ def _build_model(
     node_dim: int,
     number_of_nodes: int,
     model_config: Mapping[str, Any],
-    vae_config: Mapping[str, Any],
 ) -> torch.nn.Module:
     common = {
         "node_dim": node_dim,
@@ -581,12 +573,11 @@ def _build_model(
             target_mode=target_mode,
             branch_hidden_dim=int(model_config.get("branch_hidden_dim", 32)),
             fusion_hidden_dim=int(model_config.get("branch_fusion_hidden_dim", 64)),
+            invariant_mlp_hidden_dim=int(
+                model_config.get("invariant_mlp_hidden_dim", 160)
+            ),
         )
-    return SocialPatchVAE(
-        **common,
-        number_of_nodes=number_of_nodes,
-        latent_dim=int(vae_config.get("latent_dim", 32)),
-    )
+    raise ValueError(f"unsupported GNN objective {objective!r}")
 
 
 def _checkpoint_payload(
@@ -646,10 +637,8 @@ def _export_embeddings(
                     )
                 elif objective in {"graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES:
                     embedding = model.encode_batch(batch)
-                else:
-                    # The deterministic VAE representation is its posterior
-                    # mean, not the pre-variational graph activation.
-                    embedding = model(batch, sample=False)["mu"]
+                else:  # pragma: no cover - guarded by objective validation
+                    raise RuntimeError(f"unsupported GNN objective {objective!r}")
                 length = int(batch["sequence_length"][0].item())
                 trial_id = str(batch["trial_id"][0])
                 path = split_dir / f"{trial_id}_g_t.npz"
@@ -659,9 +648,7 @@ def _export_embeddings(
                     trial_id=np.asarray(trial_id),
                     split=np.asarray(split),
                     objective=np.asarray(objective),
-                    representation=np.asarray(
-                        "mu" if objective == "vae" else "g_t"
-                    ),
+                    representation=np.asarray("g_t"),
                     edge_mode=np.asarray(edge_mode),
                     g_t=embedding[0, :length].detach().cpu().numpy().astype(np.float32),
                     patch_start_s=batch["patch_start_s"][0, :length].cpu().numpy(),
@@ -715,11 +702,17 @@ def _run_definitions(config: Mapping[str, Any]) -> list[dict[str, Any]]:
         }
         if "selection_metric" in raw:
             record["selection_metric"] = str(raw["selection_metric"])
+        for key in ("model", "ssl"):
+            if key in raw:
+                if not isinstance(raw[key], Mapping):
+                    raise ValueError(f"run {key} override must be a mapping")
+                record[key] = dict(raw[key])
         for key in (
             "node_loss_weight",
             "edge_loss_weight",
             "preserve_loss_weight",
             "masked_loss_weight",
+            "relational_match_weight",
         ):
             if key in raw:
                 value = float(raw[key])
@@ -812,14 +805,12 @@ def run_experiment(
 
     training_config = config.get("training", {})
     model_config = config.get("model", {})
-    vae_config = config.get("vae", {})
     ssl_config = config.get("ssl", {})
     epochs = 1 if smoke_test else int(training_config.get("epochs", 100))
     if epochs < 1:
         raise ValueError("training.epochs must be >= 1")
     batch_size = int(training_config.get("batch_size", 1))
     num_workers = int(training_config.get("num_workers", 0))
-    mask_config = _mask_config(config)
     node_dim = normalized_training[0].node_features.shape[-1]
     number_of_nodes = normalized_training[0].node_features.shape[1]
 
@@ -851,11 +842,7 @@ def run_experiment(
     for run in _run_definitions(config):
         run_dir = session_dir / run["name"]
         run_dir.mkdir()
-        run_seed = (
-            seed
-            if run["objective"] in {"masked_ssl", "graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES
-            else seed + 1_000_000
-        )
+        run_seed = seed
         # All masked edge ablations start from identical weights and use the
         # same trial order and target masks. Their only intended difference is
         # the edge input condition.
@@ -876,12 +863,14 @@ def run_experiment(
             num_workers=num_workers,
             pin_memory=device.type == "cuda",
         )
+        effective_model_config = {**model_config, **run.get("model", {})}
+        effective_ssl_config = {**ssl_config, **run.get("ssl", {})}
+        run_mask_config = _mask_config(config, run.get("ssl", {}))
         model = _build_model(
             run["objective"],
             node_dim=node_dim,
             number_of_nodes=number_of_nodes,
-            model_config=model_config,
-            vae_config=vae_config,
+            model_config=effective_model_config,
         ).to(device)
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -906,15 +895,14 @@ def run_experiment(
                 edge_mode=run["edge_mode"],
                 device=device,
                 seed=run_seed + epoch * 10,
-                mask_config=mask_config,
-                node_loss_weight=float(run.get("node_loss_weight", ssl_config.get("node_loss_weight", 1.0))),
-                edge_loss_weight=float(run.get("edge_loss_weight", ssl_config.get("edge_loss_weight", 1.0))),
-                preserve_loss_weight=float(run.get("preserve_loss_weight", ssl_config.get("preserve_loss_weight", 1.0))),
-                masked_loss_weight=float(run.get("masked_loss_weight", ssl_config.get("masked_loss_weight", 1.0))),
+                mask_config=run_mask_config,
+                node_loss_weight=float(run.get("node_loss_weight", effective_ssl_config.get("node_loss_weight", 1.0))),
+                edge_loss_weight=float(run.get("edge_loss_weight", effective_ssl_config.get("edge_loss_weight", 1.0))),
+                preserve_loss_weight=float(run.get("preserve_loss_weight", effective_ssl_config.get("preserve_loss_weight", 1.0))),
+                masked_loss_weight=float(run.get("masked_loss_weight", effective_ssl_config.get("masked_loss_weight", 1.0))),
                 relational_match_weight=float(
-                    ssl_config.get("relational_match_weight", 0.0)
+                    run.get("relational_match_weight", effective_ssl_config.get("relational_match_weight", 0.0))
                 ),
-                kl_beta=float(vae_config.get("kl_beta", 1e-3)),
                 optimizer=optimizer,
                 gradient_clip_norm=(
                     None
@@ -929,15 +917,14 @@ def run_experiment(
                 edge_mode=run["edge_mode"],
                 device=device,
                 seed=run_seed + 9_000_000,
-                mask_config=mask_config,
-                node_loss_weight=float(run.get("node_loss_weight", ssl_config.get("node_loss_weight", 1.0))),
-                edge_loss_weight=float(run.get("edge_loss_weight", ssl_config.get("edge_loss_weight", 1.0))),
-                preserve_loss_weight=float(run.get("preserve_loss_weight", ssl_config.get("preserve_loss_weight", 1.0))),
-                masked_loss_weight=float(run.get("masked_loss_weight", ssl_config.get("masked_loss_weight", 1.0))),
+                mask_config=run_mask_config,
+                node_loss_weight=float(run.get("node_loss_weight", effective_ssl_config.get("node_loss_weight", 1.0))),
+                edge_loss_weight=float(run.get("edge_loss_weight", effective_ssl_config.get("edge_loss_weight", 1.0))),
+                preserve_loss_weight=float(run.get("preserve_loss_weight", effective_ssl_config.get("preserve_loss_weight", 1.0))),
+                masked_loss_weight=float(run.get("masked_loss_weight", effective_ssl_config.get("masked_loss_weight", 1.0))),
                 relational_match_weight=float(
-                    ssl_config.get("relational_match_weight", 0.0)
+                    run.get("relational_match_weight", effective_ssl_config.get("relational_match_weight", 0.0))
                 ),
-                kl_beta=float(vae_config.get("kl_beta", 1e-3)),
                 optimizer=None,
                 gradient_clip_norm=None,
             )
@@ -1020,7 +1007,7 @@ def run_experiment(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train patch-level Social-GNN masked SSL and VAE controls from "
+            "Train patch-level Social-GNN SSL objectives from "
             "strictly aligned node/edge trial packages."
         )
     )

@@ -60,6 +60,7 @@ class LoadedEncoder:
     parameter_count: int
     objective: str = "masked_ssl"
     representation: str = "g_t"
+    model_config: dict[str, Any] | None = None
 
 
 def standardizer_from_manifest(manifest: Mapping[str, Any]) -> FeatureStandardizer:
@@ -100,7 +101,7 @@ def load_trials(config_path: str | Path) -> tuple[dict[str, Any], list[SocialTri
 
 
 def discover_masked_checkpoints(experiment_dir: str | Path) -> dict[str, Path]:
-    """Find Masked-SSL ``best.pt`` files without including VAE checkpoints."""
+    """Find Masked-SSL ``best.pt`` files."""
 
     root = Path(experiment_dir)
     checkpoints: dict[str, Path] = {}
@@ -119,7 +120,7 @@ def discover_encoder_checkpoints(experiment_dir: str | Path) -> dict[str, Path]:
 
     root = Path(experiment_dir)
     checkpoints: dict[str, Path] = {}
-    accepted = {"masked_ssl", "graph_ssl", "mlp_graph_ssl", "vae"} | NEW_GRAPH_OBJECTIVES
+    accepted = {"masked_ssl", "graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES
     for path in sorted(root.glob("*/best.pt")):
         payload = torch.load(path, map_location="cpu", weights_only=False)
         run = payload.get("run_config", {})
@@ -138,8 +139,6 @@ def load_encoder(
     number_of_nodes: int,
     device: torch.device,
     name: str | None = None,
-    vae_config: Mapping[str, Any] | None = None,
-    representation: str | None = None,
 ) -> LoadedEncoder:
     """Load one frozen patch encoder and its normalization contract."""
 
@@ -147,19 +146,14 @@ def load_encoder(
     payload = torch.load(path, map_location="cpu", weights_only=False)
     run = payload.get("run_config", {})
     objective = str(run.get("objective", ""))
-    if objective not in {"masked_ssl", "graph_ssl", "mlp_graph_ssl", "vae"} | NEW_GRAPH_OBJECTIVES:
+    if objective not in {"masked_ssl", "graph_ssl", "mlp_graph_ssl"} | NEW_GRAPH_OBJECTIVES:
         raise ValueError(f"{path} is not a supported encoder checkpoint")
-    selected_representation = representation or ("mu" if objective == "vae" else "g_t")
-    if objective == "vae" and selected_representation not in {"mu", "g_t"}:
-        raise ValueError("VAE representation must be 'mu' or 'g_t'")
-    if objective != "vae" and selected_representation != "g_t":
-        raise ValueError("non-VAE encoders expose only the 'g_t' representation")
+    effective_model_config = {**model_config, **run.get("model", {})}
     model = _build_model(
         objective,
         node_dim=node_dim,
         number_of_nodes=number_of_nodes,
-        model_config=model_config,
-        vae_config=vae_config or {},
+        model_config=effective_model_config,
     )
     model.load_state_dict(payload["model_state"], strict=True)
     model.to(device).eval()
@@ -174,7 +168,8 @@ def load_encoder(
         epoch=int(payload["epoch"]) if "epoch" in payload else None,
         parameter_count=sum(parameter.numel() for parameter in model.parameters()),
         objective=objective,
-        representation=selected_representation,
+        representation="g_t",
+        model_config=dict(effective_model_config),
     )
 
 
@@ -187,18 +182,17 @@ def make_random_encoder(
     device: torch.device,
     seed: int,
     name: str = "random_untrained",
-    vae_config: Mapping[str, Any] | None = None,
 ) -> LoadedEncoder:
     """Create a deterministic untrained architecture control."""
 
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
+        effective_model_config = reference.model_config or dict(model_config)
         model = _build_model(
             reference.objective,
             node_dim=node_dim,
             number_of_nodes=number_of_nodes,
-            model_config=model_config,
-            vae_config=vae_config or {},
+            model_config=effective_model_config,
         )
     model.to(device).eval()
     for parameter in model.parameters():
@@ -213,6 +207,7 @@ def make_random_encoder(
         parameter_count=sum(parameter.numel() for parameter in model.parameters()),
         objective=reference.objective,
         representation=reference.representation,
+        model_config=effective_model_config,
     )
 
 
@@ -413,9 +408,7 @@ def encode_package(
 ) -> np.ndarray:
     """Encode one normalized full trial in patch-only chunks.
 
-    Ordinary SSL models expose ``g_t``. VAE models expose either deterministic
-    posterior ``mu`` (the canonical VAE representation) or pre-VAE ``g_t`` for
-    a diagnostic showing where information is lost.
+    Every supported encoder exposes one deterministic patch-level ``g_t``.
     """
 
     outputs: list[np.ndarray] = []
@@ -435,23 +428,11 @@ def encode_package(
         confidence = torch.from_numpy(
             np.array(package.edge_confidence[start:stop], copy=True)
         ).unsqueeze(0).to(device)
-        if encoder.objective == "vae":
-            result = encoder.model(
-                {
-                    "node_features": nodes,
-                    "node_mask": node_mask,
-                    "edge_values": values,
-                    "edge_confidence": confidence,
-                },
-                sample=False,
-            )
-            embedding = result[encoder.representation]
-        else:
-            embedding = encoder.model.encoder(
-                nodes,
-                compose_edge_inputs(values, confidence),
-                node_mask=node_mask,
-            )
+        embedding = encoder.model.encoder(
+            nodes,
+            compose_edge_inputs(values, confidence),
+            node_mask=node_mask,
+        )
         outputs.append(embedding[0].cpu().numpy().astype(np.float32))
     return np.concatenate(outputs, axis=0)
 

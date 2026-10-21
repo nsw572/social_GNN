@@ -4,6 +4,8 @@
 !/social_gnn/
 !/configs/
 !/tests/
+!/SOCIAL_GNN_MILESTONES/
+!/SOCIAL_GNN_MILESTONES/**
 
 **/__pycache__/
 *.py[cod]

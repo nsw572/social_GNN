@@ -1,0 +1,51 @@
+version: social_gnn_downstream_v1
+
+encoder:
+  experiment_config: configs/social_gnn_hybrid_9dim_v1.yaml
+  checkpoint: evaluation_runs/hybrid_9dim_v1/selected_encoder/best.pt
+  sha256: 71308AFECE26700B6AD8E78876F198BA10170FC4FA2A8ACCD8F5C7DD9D0A00A4
+  embedding_dir: evaluation_runs/hybrid_9dim_v1/downstream/seed_20261013/embeddings
+  frozen: true
+
+split:
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  validation_trials: [A4_C4]
+  exploratory_only_trials: [A5_C5]
+
+preprocessing:
+  standardize_from_training_trials_only: true
+  selected_pca_dim: 16
+  evaluated_dimensions: [16]
+
+search:
+  state_counts: [4, 6, 8]
+  seeds: [0, 1, 2]
+  covariance_floor: 0.001
+  hmm_max_iterations: 40
+  hsmm_max_iterations: 20
+  convergence_tolerance: 0.0001
+
+selected_hmm:
+  status: provisional
+  reason: compromise_between_validation_fit_seed_stability_and_fragmentation
+  type: diagonal_gaussian_hmm
+  states: 6
+  seed: 1
+  checkpoint: evaluation_runs/hybrid_9dim_v1/selected_temporal/hmm_k6_seed1/model.npz
+  preprocessing: evaluation_runs/hybrid_9dim_v1/selected_temporal/hmm_k6_seed1/preprocessing.npz
+  state_exports: evaluation_runs/hybrid_9dim_v1/downstream/seed_20261013/exports/hmm_k6_seed1
+
+comparison_hsmm:
+  type: shifted_poisson_diagonal_gaussian_hsmm
+  states: 6
+  seed: 1
+  maximum_duration_timesteps: 100
+  nominal_maximum_duration_s: 16.0
+  checkpoint: evaluation_runs/hybrid_9dim_v1/downstream/seed_20261013/search/models/hsmm/d16_k6/seed_1.npz
+  preprocessing: evaluation_runs/hybrid_9dim_v1/downstream/seed_20261013/search/preprocessing_d16.npz
+  state_exports: evaluation_runs/hybrid_9dim_v1/downstream/seed_20261013/exports/hsmm_k6_seed1
+
+timing:
+  convention: patch_center_voronoi_boundaries
+  derive_stride_from_timestamps: true
+  never_join_trials_or_invalid_gaps: true

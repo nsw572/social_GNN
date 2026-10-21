@@ -32,6 +32,8 @@ class FrozenEmbeddingTrial:
     valid_time_mask: np.ndarray
     encoder_checkpoint: str
     encoder_config: str
+    node_valid_fraction: np.ndarray | None = None
+    edge_confidence_mean: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         trial = self.trial_id or "<unknown>"
@@ -54,7 +56,29 @@ class FrozenEmbeddingTrial:
             raise ValueError(f"{trial}: every patch must have positive duration")
         if np.any(np.diff(start) <= 0) or np.any(np.diff(end) <= 0):
             raise ValueError(f"{trial}: patch clock must be strictly chronological")
-        for value in (embedding, start, end, valid):
+        node_valid = (
+            valid.astype(np.float32)
+            if self.node_valid_fraction is None
+            else np.asarray(self.node_valid_fraction, dtype=np.float32)
+        )
+        edge_confidence = (
+            np.zeros((length, 0), dtype=np.float32)
+            if self.edge_confidence_mean is None
+            else np.asarray(self.edge_confidence_mean, dtype=np.float32)
+        )
+        if node_valid.shape != (length,):
+            raise ValueError(f"{trial}: node_valid_fraction must have shape [T]")
+        if edge_confidence.ndim != 2 or edge_confidence.shape[0] != length:
+            raise ValueError(f"{trial}: edge_confidence_mean must have shape [T,F]")
+        if not np.isfinite(node_valid).all() or not np.isfinite(edge_confidence).all():
+            raise ValueError(f"{trial}: confidence metadata contain nonfinite values")
+        if np.any((node_valid < 0) | (node_valid > 1)) or np.any(
+            (edge_confidence < 0) | (edge_confidence > 1)
+        ):
+            raise ValueError(f"{trial}: confidence metadata must be in [0,1]")
+        object.__setattr__(self, "node_valid_fraction", node_valid)
+        object.__setattr__(self, "edge_confidence_mean", edge_confidence)
+        for value in (embedding, start, end, valid, node_valid, edge_confidence):
             value.setflags(write=False)
 
     @property
@@ -103,6 +127,8 @@ class FrozenEmbeddingTrial:
             valid_time_mask=self.valid_time_mask,
             encoder_checkpoint=np.asarray(self.encoder_checkpoint),
             encoder_config=np.asarray(self.encoder_config),
+            node_valid_fraction=self.node_valid_fraction,
+            edge_confidence_mean=self.edge_confidence_mean,
         )
         return output
 
@@ -117,6 +143,16 @@ class FrozenEmbeddingTrial:
                 valid_time_mask=np.asarray(data["valid_time_mask"], dtype=bool),
                 encoder_checkpoint=str(data["encoder_checkpoint"].item()),
                 encoder_config=str(data["encoder_config"].item()),
+                node_valid_fraction=(
+                    np.asarray(data["node_valid_fraction"], dtype=np.float32)
+                    if "node_valid_fraction" in data.files
+                    else None
+                ),
+                edge_confidence_mean=(
+                    np.asarray(data["edge_confidence_mean"], dtype=np.float32)
+                    if "edge_confidence_mean" in data.files
+                    else None
+                ),
             )
 
 
@@ -202,6 +238,11 @@ def extract_frozen_embeddings(
             encoder, normalized, device=device, chunk_size=chunk_size
         )
         valid = np.asarray(package.node_mask, dtype=bool).all(axis=1)
+        node_valid_fraction = np.asarray(package.node_mask, dtype=np.float32).mean(axis=1)
+        edge_confidence_mean = 0.5 * (
+            np.asarray(package.edge_confidence[:, 0, 1], dtype=np.float32)
+            + np.asarray(package.edge_confidence[:, 1, 0], dtype=np.float32)
+        )
         trial = FrozenEmbeddingTrial(
             trial_id=package.trial_id,
             graph_embeddings=embedding,
@@ -210,6 +251,8 @@ def extract_frozen_embeddings(
             valid_time_mask=np.array(valid, copy=True),
             encoder_checkpoint=encoder_description,
             encoder_config=str(config_path),
+            node_valid_fraction=node_valid_fraction,
+            edge_confidence_mean=edge_confidence_mean,
         )
         path = trial.save(output / f"{trial.trial_id}_g_t.npz")
         runs = trial.contiguous_valid_runs()
@@ -232,9 +275,38 @@ def extract_frozen_embeddings(
         "encoder_name": encoder.name,
         "encoder_objective": encoder.objective,
         "encoder_epoch": encoder.epoch,
+        "encoder_parameter_count": encoder.parameter_count,
+        "encoder_model_config": encoder.model_config,
         "embedding_dim": int(records[0]["shape"][1]),
         "device": str(device),
         "split": config.get("split", {}),
+        "training_trials": [
+            package.trial_id
+            for package in packages
+            if package.trial_id
+            not in set(config.get("split", {}).get("validation_trials", []))
+            | set(config.get("split", {}).get("test_trials", []))
+            | set(config.get("split", {}).get("excluded_trials", []))
+        ],
+        "normalization": encoder.normalizer.to_manifest(),
+        "timestamp_grid": {
+            "version": "authoritative_social_clock_v1",
+            "source": "SocialTrialPackage.patch_start_s/patch_end_s",
+            "trial_clock_summary": {
+                package.trial_id: {
+                    "patches": int(package.patch_start_s.size),
+                    "median_duration_s": float(
+                        np.median(package.patch_end_s - package.patch_start_s)
+                    ),
+                    "median_center_stride_s": float(
+                        np.median(
+                            np.diff(0.5 * (package.patch_start_s + package.patch_end_s))
+                        )
+                    ),
+                }
+                for package in packages
+            },
+        },
         "trials": records,
         "notes": [
             "Rows remain in authoritative chronological order.",

@@ -1,0 +1,27 @@
+{
+  "contract": "social_gnn_video_clock_offset_v1",
+  "offset_convention": "video_pts = social_patch_time + video_time_offset_s",
+  "global_note": "Upstream stated that delivered IMU/node timestamps were already aligned to video-relative time. The idtracker export starts frame_id/fps at zero and all five source video streams start at PTS 0.0. These facts support an explicit zero offset but are not independent hardware/event synchronization proof.",
+  "trials": {
+    "A1_C1": {
+      "video_time_offset_s": 0.0,
+      "time_origin_provenance": "upstream_video_relative_alignment_statement_plus_source_stream_start_pts_zero"
+    },
+    "A3_C3": {
+      "video_time_offset_s": 0.0,
+      "time_origin_provenance": "upstream_video_relative_alignment_statement_plus_source_stream_start_pts_zero"
+    },
+    "A4_B4": {
+      "video_time_offset_s": 0.0,
+      "time_origin_provenance": "upstream_video_relative_alignment_statement_plus_source_stream_start_pts_zero"
+    },
+    "A4_C4": {
+      "video_time_offset_s": 0.0,
+      "time_origin_provenance": "upstream_video_relative_alignment_statement_plus_source_stream_start_pts_zero"
+    },
+    "A5_C5": {
+      "video_time_offset_s": 0.0,
+      "time_origin_provenance": "upstream_video_relative_alignment_statement_plus_source_stream_start_pts_zero"
+    }
+  }
+}

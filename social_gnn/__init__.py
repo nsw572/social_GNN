@@ -31,9 +31,11 @@ from .graph_level_ssl import (
     GraphLevelSocialSSL,
     GraphLevelTargets,
     MLPFusionEncoder,
+    SymmetrizedMLPFusionEncoder,
     graph_node_target_dim,
     graph_level_reconstruction_loss,
     graph_level_targets,
+    swap_two_animal_graph,
 )
 from .node_preservation_ssl import (
     DualBranchSocialEncoder,
@@ -42,8 +44,7 @@ from .node_preservation_ssl import (
     hybrid_reconstruction_loss,
     node_preserving_reconstruction_loss,
 )
-from .vae import SocialPatchVAE, social_patch_vae_loss
-from .training import train_masked_social_ssl_epoch, train_social_patch_vae_epoch
+from .training import train_masked_social_ssl_epoch
 from .imu_video_identity import (
     EntryOrderEvidence,
     HorizontalAcceleration,
@@ -84,6 +85,8 @@ __all__ = [
     "GraphLevelSocialSSL",
     "GraphLevelTargets",
     "MLPFusionEncoder",
+    "SymmetrizedMLPFusionEncoder",
+    "swap_two_animal_graph",
     "graph_node_target_dim",
     "graph_level_reconstruction_loss",
     "graph_level_targets",
@@ -92,10 +95,7 @@ __all__ = [
     "NodeSetEncoder",
     "hybrid_reconstruction_loss",
     "node_preserving_reconstruction_loss",
-    "SocialPatchVAE",
-    "social_patch_vae_loss",
     "train_masked_social_ssl_epoch",
-    "train_social_patch_vae_epoch",
     "EntryOrderEvidence",
     "HorizontalAcceleration",
     "MotionIdentityEvidence",

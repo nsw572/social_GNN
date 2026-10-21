@@ -1,6 +1,4 @@
 import unittest
-from pathlib import Path
-
 import numpy as np
 import torch
 
@@ -16,7 +14,7 @@ from social_gnn.evaluation import (
     unique_edge_targets,
 )
 from social_gnn.experiment import fit_feature_standardizer
-from social_gnn.vae import SocialPatchVAE
+from social_gnn.masked_social_ssl import MaskedSocialSSL
 
 
 def make_package(timesteps: int = 40) -> SocialTrialPackage:
@@ -46,43 +44,36 @@ def make_package(timesteps: int = 40) -> SocialTrialPackage:
 
 
 class EvaluationUtilitiesTest(unittest.TestCase):
-    def test_vae_probe_uses_deterministic_mu_and_can_audit_pre_vae_g(self):
+    def test_gnn_probe_is_deterministic_and_patch_aligned(self):
         package = make_package(12)
         normalizer = fit_feature_standardizer([package])
         normalized = normalizer.transform(package)
-        model = SocialPatchVAE(
+        model = MaskedSocialSSL(
             node_dim=3,
             number_of_nodes=2,
             hidden_dim=8,
-            latent_dim=4,
             layers=1,
         ).eval()
         common = dict(
-            name="vae",
+            name="gnn",
             model=model,
             normalizer=normalizer,
             native_edge_mode="full",
-            checkpoint_path=str(Path("vae.pt")),
+            checkpoint_path="gnn.pt",
             epoch=1,
             parameter_count=sum(value.numel() for value in model.parameters()),
-            objective="vae",
-        )
-        mu = encode_package(
-            LoadedEncoder(**common, representation="mu"),
-            normalized,
-            device=torch.device("cpu"),
+            objective="masked_ssl",
         )
         graph = encode_package(
-            LoadedEncoder(**common, representation="g_t"),
+            LoadedEncoder(**common),
             normalized,
             device=torch.device("cpu"),
         )
-        self.assertEqual(mu.shape, (12, 4))
         self.assertEqual(graph.shape, (12, 8))
         np.testing.assert_array_equal(
-            mu,
+            graph,
             encode_package(
-                LoadedEncoder(**common, representation="mu"),
+                LoadedEncoder(**common),
                 normalized,
                 device=torch.device("cpu"),
             ),

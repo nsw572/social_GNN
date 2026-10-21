@@ -8,6 +8,8 @@ import torch
 
 from social_gnn.data import SocialTrialPackage, collate_social_trials
 from social_gnn.experiment import (
+    _build_model,
+    _run_definitions,
     apply_edge_mode,
     fit_feature_standardizer,
     run_experiment,
@@ -79,6 +81,33 @@ class SocialExperimentTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def test_removed_objective_is_rejected_and_run_overrides_are_preserved(self):
+        with self.assertRaisesRegex(ValueError, "objective must be one of"):
+            _run_definitions(
+                {"runs": [{"name": "removed", "objective": "vae"}]}
+            )
+        runs = _run_definitions(
+            {
+                "runs": [
+                    {
+                        "name": "override",
+                        "objective": "masked_ssl",
+                        "model": {"graph_dim": 4},
+                        "ssl": {"couple_symmetric_traits": True},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(runs[0]["model"]["graph_dim"], 4)
+        self.assertTrue(runs[0]["ssl"]["couple_symmetric_traits"])
+        with self.assertRaisesRegex(ValueError, "unsupported GNN objective"):
+            _build_model(
+                "vae",
+                node_dim=9,
+                number_of_nodes=2,
+                model_config={"hidden_dim": 8, "layers": 1},
+            )
+
     def test_train_only_standardizer_preserves_masks_and_confidence(self):
         train = make_package("train", 5)
         held_out = make_package("held_out", 4, offset=100.0)
@@ -147,7 +176,6 @@ class SocialExperimentTest(unittest.TestCase):
                 "node_modality_dropout": 0.0,
                 "edge_modality_dropout": 0.0,
             },
-            "vae": {"latent_dim": 4, "kl_beta": 0.001},
             "training": {
                 "epochs": 1,
                 "batch_size": 1,
@@ -156,14 +184,20 @@ class SocialExperimentTest(unittest.TestCase):
             },
             "runs": [
                 {"name": "masked", "objective": "masked_ssl", "edge_mode": "full"},
-                {"name": "vae", "objective": "vae", "edge_mode": "full"},
+                {
+                    "name": "masked_g4_coupled",
+                    "objective": "masked_ssl",
+                    "edge_mode": "full",
+                    "model": {"graph_dim": 4},
+                    "ssl": {"couple_symmetric_traits": True},
+                },
             ],
         }
         manifest = run_experiment(config)
         self.assertEqual(manifest["status"], "completed")
         session = Path(manifest["output_dir"])
         self.assertTrue((session / "normalization.json").is_file())
-        for name in ("masked", "vae"):
+        for name in ("masked", "masked_g4_coupled"):
             self.assertTrue((session / name / "best.pt").is_file())
             self.assertTrue((session / name / "last.pt").is_file())
             self.assertTrue((session / name / "metrics.jsonl").is_file())
@@ -177,6 +211,8 @@ class SocialExperimentTest(unittest.TestCase):
             with np.load(embedding_path, allow_pickle=False) as payload:
                 self.assertEqual(payload["g_t"].shape[0], 4)
                 self.assertTrue(np.isfinite(payload["g_t"]).all())
+                expected_dim = 4 if name == "masked_g4_coupled" else 8
+                self.assertEqual(payload["g_t"].shape[1], expected_dim)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from torch import nn
 from .graph_builder import compose_edge_inputs
 from .graph_level_ssl import (
     GRAPH_EDGE_TARGET_DIM,
+    SymmetrizedMLPFusionEncoder,
     _mlp,
     _weighted_selected_mse,
     graph_node_target_dim,
@@ -40,6 +41,8 @@ NEW_GRAPH_OBJECTIVES = frozenset(
         "graph_set_hybrid_ssl",
         "dual_set_hybrid_ssl",
         "dual_joint_hybrid_ssl",
+        "invariant_mlp_full_ssl",
+        "invariant_mlp_hybrid_ssl",
     }
 )
 HYBRID_OBJECTIVES = frozenset(
@@ -50,6 +53,7 @@ HYBRID_OBJECTIVES = frozenset(
         "graph_set_hybrid_ssl",
         "dual_set_hybrid_ssl",
         "dual_joint_hybrid_ssl",
+        "invariant_mlp_hybrid_ssl",
     }
 )
 FULL_ONLY_OBJECTIVES = NEW_GRAPH_OBJECTIVES - HYBRID_OBJECTIVES
@@ -186,7 +190,9 @@ def objective_architecture(objective: str) -> tuple[str, str]:
     if objective not in NEW_GRAPH_OBJECTIVES:
         raise ValueError(f"unsupported node-preservation objective {objective!r}")
     architecture = (
-        "node_set"
+        "invariant_mlp"
+        if objective.startswith("invariant_mlp_")
+        else "node_set"
         if objective == "node_branch_hybrid_ssl"
         else "dual"
         if objective.startswith("dual_")
@@ -219,6 +225,7 @@ class NodePreservingGraphSSL(nn.Module):
         target_mode: str = "summary",
         branch_hidden_dim: int = 32,
         fusion_hidden_dim: int = 64,
+        invariant_mlp_hidden_dim: int = 160,
     ) -> None:
         super().__init__()
         if number_of_nodes != 2:
@@ -252,8 +259,19 @@ class NodePreservingGraphSSL(nn.Module):
                 branch_hidden_dim=branch_hidden_dim,
                 fusion_hidden_dim=fusion_hidden_dim,
             )
+        elif architecture == "invariant_mlp":
+            self.encoder = SymmetrizedMLPFusionEncoder(
+                node_dim=node_dim,
+                number_of_nodes=number_of_nodes,
+                edge_dim=16,
+                graph_dim=graph_dim,
+                fusion_hidden_dim=invariant_mlp_hidden_dim,
+            )
         else:
-            raise ValueError("architecture must be 'gnn', 'node_set', or 'dual'")
+            raise ValueError(
+                "architecture must be 'gnn', 'node_set', 'dual', or "
+                "'invariant_mlp'"
+            )
         if target_mode not in {"summary", "node_set", "joint_set"}:
             raise ValueError("target_mode must be summary, node_set, or joint_set")
         self.architecture = architecture

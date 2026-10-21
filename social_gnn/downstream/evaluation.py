@@ -160,11 +160,18 @@ def segmentation_metrics(
         "bouts_per_minute": float(len(bouts) / max(total_minutes, 1e-12)),
         "mean_bout_duration_s": float(duration.mean()),
         "median_bout_duration_s": float(np.median(duration)),
+        "bout_duration_q10_s": float(np.quantile(duration, 0.10)),
+        "bout_duration_q90_s": float(np.quantile(duration, 0.90)),
         "fraction_one_timestep_bouts": float(np.mean(timesteps == 1)),
         "fraction_long_bouts": float(np.mean(duration >= long_bout_s)),
         "occupied_states": float(np.sum(occupancy > 0)),
         "states_over_one_percent": float(np.sum(occupancy >= 0.01)),
         "effective_entropy_states": effective_entropy_states,
+        "largest_state_occupancy": float(occupancy.max(initial=0.0)),
+        "smallest_nonempty_state_occupancy": float(
+            positive.min() if positive.size else 0.0
+        ),
+        "near_empty_states": float(np.sum((occupancy > 0) & (occupancy < 0.01))),
         "mean_posterior_entropy": float(entropy.mean()),
         "mean_state_confidence": float(
             np.mean(

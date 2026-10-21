@@ -1,5 +1,5 @@
 version: social_gnn_experiment_v0
-output_dir: evaluation_runs/vae_gnn_probe_v1/training
+output_dir: evaluation_runs/next_phase/graph_bottleneck_mean
 seed: 20261013
 device: cuda:1
 
@@ -12,18 +12,26 @@ trials:
 
 split:
   validation_trials: [A4_C4]
-  excluded_trials: [A5_C5]
+  test_trials: [A5_C5]
 
 normalization: {epsilon: 1.0e-6}
 
 model:
   hidden_dim: 64
+  graph_dim: 64
   layers: 2
   decoder_hidden_dim: 64
+  readout: mean
+  fusion_hidden_dim: 192
 
-vae:
-  latent_dim: 32
-  kl_beta: 0.001
+ssl:
+  node_mask_probability: 0.15
+  edge_mask_probability: 0.15
+  node_modality_dropout: 0.05
+  edge_modality_dropout: 0.05
+  couple_symmetric_traits: true
+  node_loss_weight: 1.0
+  edge_loss_weight: 1.0
 
 training:
   epochs: 100
@@ -34,4 +42,5 @@ training:
   gradient_clip_norm: 5.0
 
 runs:
-  - {name: vae_gnn, objective: vae, edge_mode: full, selection_metric: total}
+  - {name: graph_bottleneck_mean, objective: graph_ssl, edge_mode: full, selection_metric: total}
+  - {name: mlp_graph_bottleneck, objective: mlp_graph_ssl, edge_mode: full, selection_metric: total}

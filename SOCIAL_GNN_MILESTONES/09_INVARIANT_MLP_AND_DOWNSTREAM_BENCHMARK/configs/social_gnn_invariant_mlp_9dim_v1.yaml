@@ -1,0 +1,56 @@
+version: social_gnn_experiment_v0
+output_dir: evaluation_runs/gnn_9dim_downstream_v1/invariant_mlp/training
+seed: 20261013
+device: cuda:0
+
+trials:
+  - {id: A1_C1, node_npz: 'evaluation_runs\hybrid_9dim_v1\nodes\A1_C1_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A1_C1\edges\A1_C1_social_edges.npz'}
+  - {id: A3_C3, node_npz: 'evaluation_runs\hybrid_9dim_v1\nodes\A3_C3_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A3_C3\edges\A3_C3_social_edges.npz'}
+  - {id: A4_B4, node_npz: 'evaluation_runs\hybrid_9dim_v1\nodes\A4_B4_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A4_B4\edges\A4_B4_social_edges.npz'}
+  - {id: A4_C4, node_npz: 'evaluation_runs\hybrid_9dim_v1\nodes\A4_C4_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A4_C4\edges\A4_C4_social_edges.npz'}
+  - {id: A5_C5, node_npz: 'evaluation_runs\hybrid_9dim_v1\nodes\A5_C5_node_features.npz', edge_npz: 'D:\wxh本地化处理库\social_gnn_6dim_v0\video_features\A5_C5\edges\A5_C5_social_edges.npz'}
+
+split:
+  validation_trials: [A4_C4]
+  excluded_trials: [A5_C5]
+
+normalization: {epsilon: 1.0e-6}
+
+model:
+  hidden_dim: 64
+  graph_dim: 64
+  layers: 2
+  decoder_hidden_dim: 64
+  readout: mean
+  invariant_mlp_hidden_dim: 160
+
+ssl:
+  node_mask_probability: 0.15
+  edge_mask_probability: 0.15
+  node_modality_dropout: 0.05
+  edge_modality_dropout: 0.05
+  couple_symmetric_traits: true
+  node_loss_weight: 1.0
+  edge_loss_weight: 1.0
+  preserve_loss_weight: 2.0
+  masked_loss_weight: 1.0
+
+training:
+  epochs: 100
+  batch_size: 1
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip_norm: 5.0
+
+runs:
+  - name: invariant_mlp_full
+    objective: invariant_mlp_full_ssl
+    edge_mode: full
+    selection_metric: total
+
+  - name: invariant_mlp_hybrid_p2
+    objective: invariant_mlp_hybrid_ssl
+    edge_mode: full
+    preserve_loss_weight: 2.0
+    selection_metric: total
