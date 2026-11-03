@@ -1,6 +1,6 @@
 # Social-GNN 项目里程碑档案库
 
-建立日期：2026-10-20；最近更新：2026-11-01。
+建立日期：2026-10-20；最近更新：2026-11-03。
 
 这个目录把 Social-GNN 从视频特征工程到 9D encoder/downstream benchmark 的主要开发跨步集中在 `deepOF` 根目录下。它是一套可浏览、可版本管理的项目史，不替代 `social_gnn/` 中的正式实现。
 
@@ -51,6 +51,7 @@ pointwise 重建；node/edge clock、encoder、PCA 和 downstream assignments �
 | 2026-10-22–23 | [11_POINTWISE_0P04_GNN_MLP_BENCHMARK](11_POINTWISE_0P04_GNN_MLP_BENCHMARK/README.md) | 0.04 s node/edge 重建，GNN/MLP 重训与 72-run HMM/HSMM benchmark | 当前综合 benchmark |
 | 2026-10-23 | [12_STICKY_HMM_PRIOR_SENSITIVITY](12_STICKY_HMM_PRIOR_SENSITIVITY/README.md) | 90 配置 prior strength/dwell sweep、soft transition-count audit 与状态复现性 | 当前 HMM 参数依据 |
 | 2026-11-01 | [13_STATE_ATLAS_V1](13_STATE_ATLAS_V1/README.md) | 冻结 K=12 状态的 directed edge atlas、quality/boundary QC 与四类视频采样 | 当前人工复核后端 |
+| 2026-10-30–11-03 | [14_RSLDS_FINITE_PILOT_AND_RUNTIME_AUDIT](14_RSLDS_FINITE_PILOT_AND_RUNTIME_AUDIT/README.md) | genuine rSLDS 隔离实现、有限 pilot 产物与 K=8 外部中断审计 | 可选探索分支；pilot 未完成 |
 | 持续更新 | [90_CURRENT_GUIDES](90_CURRENT_GUIDES/README.md) | 当前 README 与 noob guide 快照 | 入门与操作入口 |
 
 ## 档案规则
@@ -69,5 +70,6 @@ pointwise 重建；node/edge clock、encoder、PCA 和 downstream assignments �
 - 想查当前 0.04 s 模型选择和 HMM/HSMM 结论：看 11。
 - 想查 sticky prior 到底有多强、参数为何保留 50000/2 s：看 12。
 - 想查当前 K=12 states 的定量特征、质量混杂和视频采样：看 13。
+- 想查 rSLDS 做到哪里、哪些 cell 有产物、K=8 为何没有结果：看 14。
 - 想追溯旧 0.16 s instability 分解：看 09、10。
 - 想找本地未入 Git 的运行结果：看 [ARTIFACT_INDEX.md](ARTIFACT_INDEX.md)。

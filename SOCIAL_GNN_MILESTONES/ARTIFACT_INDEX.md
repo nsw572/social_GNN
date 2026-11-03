@@ -20,5 +20,7 @@
 | pointwise invariant MLP aggregate | `evaluation_runs/gnn_9dim_0p04_downstream_v2/aggregate_invariant_mlp/` | 36/36 MLP HMM/HSMM runs、partition ARI、occupancy 与 plots |
 | sticky-prior sensitivity | `evaluation_runs/gnn_9dim_0p04_downstream_v2/sticky_prior_sensitivity/` | 90/90 strength/dwell runs、soft expected counts、prior leverage、state correspondence、figures 与报告 |
 | State Atlas v1 | `evaluation_runs/state_atlas_v1/` | 四场 directed `[T,2,2,10]` tensors、对齐表、12-state profiles、boundary QC、144 条 clip catalog、state cards、figures 与报告 |
+| genuine rSLDS pilot | `evaluation_runs/gnn_9dim_0p04_downstream_v2/rslds_pilot_v1/` | backend/synthetic audits、K=4/M=4 与 K=6/M=4 已完成产物、有限 pilot support audit |
+| interrupted rSLDS K=8 retry | `evaluation_runs/rslds_k8_retry/` | K=8/M=4/seed=0 的启动清单与停在 EM 32/50 的 stdout/stderr；不是正式结果 |
 
 这些目录不是长期可移植档案。若要在另一台机器完整复现，需要同时备份对应 `evaluation_runs` 子目录，或从本目录中的配置快照重新运行。
