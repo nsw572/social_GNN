@@ -3,6 +3,12 @@
 第一次接触本项目时，建议先阅读中文入门文档
 [NOOBS_GUIDE.md](NOOBS_GUIDE.md)。
 
+The active clock migration is documented in
+[POINTWISE_0P04_MIGRATION.md](POINTWISE_0P04_MIGRATION.md). Reports whose names
+contain `9DIM` describe historical 0.16 s experiments until they are rerun.
+The completed 0.04 s GNN/MLP and HMM/HSMM results are summarized in
+[POINTWISE_0P04_BENCHMARK_REPORT.md](POINTWISE_0P04_BENCHMARK_REPORT.md).
+
 Social-V0 operates on animal-level graphs, not body-part graphs. It accepts
 continuous IMU latents from the upstream encoder and video-derived directed
 relational features.
@@ -123,11 +129,11 @@ is marked `training_eligible=false`.
 
 For mature per-animal latent files (`downstream [S,D_node]`, `time [S]`, and
 `interp_mask [S]`), use the separate fixed-clock converter. It assigns latent
-timestamps to half-open 0.16 s patches and computes one validity-weighted mean
-per animal and patch. At 25 Hz this normally pools four latent vectors into one
-node vector. The approximately one-second receptive field used to produce each
-upstream latent does not change the Social-GNN patch duration; it only means
-adjacent node observations are not statistically independent.
+timestamps to half-open 0.04 s bins. At the upstream 25 Hz sampling rate, one
+canonical node timestep contains exactly one latent vector; there is no longer
+a four-sample 0.16 s node average. The approximately one-second receptive field
+used to produce each upstream latent still means adjacent observations are not
+statistically independent.
 
 ```powershell
 python -m social_gnn.latent_node_converter `
@@ -135,9 +141,12 @@ python -m social_gnn.latent_node_converter `
   --animal 'A4_1c=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_A4-1c_latent.npz' `
   --animal 'B4_ab=Y:\WSB\Computational_Ethology\processed_Data\latents\6dim\A4_B4_B4-ab_latent.npz' `
   --output-identity 1 2 `
-  --authoritative-clock-npz C:\canonical_nodes\A4_B4_node_features.npz `
   --output-node-npz D:\social_trials\A4_B4\node_features.npz
 ```
+
+Generate the new 0.04 s node clock first. Only then may it be reused through
+`--authoritative-clock-npz`; an old 0.16 s clock is rejected by default rather
+than silently preserving the retired resolution.
 
 By default non-interpolated samples have weight 1, interpolated samples have
 weight 0, and a node remains valid when at least half of the expected sample
@@ -146,7 +155,7 @@ weight is present. `--interpolated-weight` and
 `node_weight_coverage`, `node_interp_fraction`, and `node_sample_count` as QC
 arrays; padding is still performed only later by the DataLoader. Optional
 `--clock-start-s`/`--clock-end-s` bounds can restrict conversion to the strict
-video/IMU overlap without changing the 0.16 s grid. For replacement latent
+video/IMU overlap without changing the 0.04 s grid. For replacement latent
 deliveries, prefer `--authoritative-clock-npz`: it preserves the existing full
 trial clock, `social_step`, identity order, and source-animal order exactly.
 Patches outside the delivered latent support remain present with zero values
@@ -391,9 +400,11 @@ every later tracking frame has the correct identity.
 ## Authoritative-clock edge extraction
 
 `edge_extraction.py` uses the one fixed patch grid stored by the node NPZ. A
-grid may overlap (for example, 0.32 s duration and 0.16 s stride), but duration
-and stride must each remain constant throughout a trial. Variable/mixed patch
-granularity and an independently generated video clock are rejected.
+canonical grid has both duration and stride equal to 0.04 s, so each row is one
+non-overlapping social timestep. The extractor rejects old 0.16 s clocks,
+overlapping grids, variable granularity, and independently generated video
+clocks unless a non-default timestep is explicitly requested for historical
+reproduction.
 
 Frames are assigned to half-open intervals `[patch_start_s, patch_end_s)`. The
 stored contract keeps three arrays separate:
@@ -494,6 +505,13 @@ identity-permutation-invariant social representation. `SocialV0` also accepts
 `readout: soft_role`, an experimental shared-scoring readout that is exactly
 invariant to exchanging both animal axes.
 
+For the exact two-animal benchmark, `SymmetrizedMLPFusionEncoder` is a separate
+non-message-passing control: it evaluates the same shared MLP under both animal
+orders and averages the two outputs. `invariant_mlp_full` and
+`invariant_mlp_hybrid_p2` therefore satisfy exact two-animal permutation
+invariance while testing whether graph message passing adds value beyond a
+capacity-comparable invariant fusion model.
+
 Run the validation-selected graph-level mean configuration with:
 
 ```powershell
@@ -508,6 +526,22 @@ recorded in `NEXT_PHASE_REPORT.md`. Information-retention summaries now write
 must use the validation column; `A5_C5` is exploratory because it was already
 inspected in earlier development.
 
+### Locked 9D confirmatory holdout
+
+The earlier inspection used a distinct upstream 6D representation. For the
+current 9D pipeline, `A5_C5` is therefore retained as a locked confirmatory
+holdout rather than being discarded. Until encoder and downstream selection
+on `A4_C4` is complete, 9D training, probe, embedding-export, temporal-model,
+QC, and interpretation defaults exclude `A5_C5`.
+
+The lock policy is recorded in
+`configs/social_gnn_9dim_confirmatory_holdout_lock_v1.yaml`. Releasing A5
+requires freezing the encoder, normalization/PCA, K/M/seed/sticky policy,
+metrics, and success criteria first, then supplying the exact explicit release
+token recorded by that policy. Existing A5 artifacts are retained as
+historical exploratory outputs; they are not deleted or treated as formal 9D
+confirmation results.
+
 ## Downstream HMM/HSMM state discovery
 
 `social_gnn.downstream` extracts frozen patch-level `g_t` embeddings and fits
@@ -515,6 +549,22 @@ continuous-observation diagonal Gaussian HMMs or genuine explicit-duration
 Gaussian HSMMs. Trials and invalid temporal runs remain independent, and bout
 seconds are derived from patch-center boundaries rather than by summing
 possibly overlapping source windows.
+
+The canonical 0.04 s HMM is sticky. Its default 2.0 s expected dwell-time prior
+implies `p_self = 1 - 0.04 / 2.0 = 0.98`; a configurable Dirichlet prior is
+applied during Baum-Welch rather than deleting short decoded bouts afterward.
+The learned diagonal transition probabilities are exported for QC. This is a
+tendency, not a hard minimum-duration rule. HSMM remains an explicit-duration
+comparison and uses no HMM self-transition.
+
+Formal HMM state-number selection is implemented in
+`downstream/k_selection.py`. It reuses frozen Graph Full and invariant-MLP Full
+embeddings plus each encoder seed's train-fitted PCA16 transform, evaluates
+`K={4,5,6,7,8,10,12}` without warm starts, and audits statistical fit,
+occupancy, temporal fragmentation, cross-seed reproducibility, cross-K
+refinements, and K-dependent sticky-prior leverage. The current statistical
+winner is K=12 at the tested grid boundary, so it must not be described as a
+resolved optimum; K=6 remains the more reproducible invariant-MLP anchor.
 
 ```powershell
 python -m social_gnn.downstream --help

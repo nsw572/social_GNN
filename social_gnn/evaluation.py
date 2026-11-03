@@ -27,6 +27,7 @@ from .experiment import (
     _load_packages,
     _resolve_device,
     _trial_specs,
+    _validate_package_clocks,
     load_experiment_config,
 )
 from .graph_builder import compose_edge_inputs
@@ -97,6 +98,7 @@ def load_trials(config_path: str | Path) -> tuple[dict[str, Any], list[SocialTri
     packages, missing = _load_packages(_trial_specs(config), allow_missing=False)
     if missing:
         raise AssertionError("allow_missing=False returned missing trials")
+    _validate_package_clocks(config, packages)
     return config, packages
 
 

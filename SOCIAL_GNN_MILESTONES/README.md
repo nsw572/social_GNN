@@ -1,6 +1,6 @@
 # Social-GNN 项目里程碑档案库
 
-建立日期：2026-10-20
+建立日期：2026-10-20；最近更新：2026-11-01。
 
 这个目录把 Social-GNN 从视频特征工程到 9D encoder/downstream benchmark 的主要开发跨步集中在 `deepOF` 根目录下。它是一套可浏览、可版本管理的项目史，不替代 `social_gnn/` 中的正式实现。
 
@@ -9,20 +9,30 @@
 ```text
 原视频
   -> idtracker.ai 质心/身份 + MouseGPT 姿态
-  -> 固定 0.16 s 权威 social clock 上的 8 edge values + 8 confidences
+  -> 固定 0.04 s 权威 social clock 上的 8 edge values + 8 confidences
 
 上游 IMU latent
-  -> 身份/时钟对齐后的 9D canonical node package
+  -> 每个 0.04 s 时点一个 9D latent 的 canonical node package
 
 node + edge
   -> SocialTrialPackage 严格校验
   -> patch-local encoder（GNN 或精确置换不变 MLP）
   -> 64D g_t
-  -> frozen downstream HMM，工作值 K=6
-  -> 视频复核与外部生物学验证
+  -> frozen downstream sticky HMM，当前工作值 K=12、strength=50000、dwell target=2 s
+  -> State Atlas 定量/QC/视频复核后端
+  -> 外部生物学验证
 ```
 
-当前没有 TCN/RNN/Transformer；VAE 路线已经从活动实现中移除。`g_t=32` 是失败消融，默认仍为 64D。当前两只动物数据上最强经验候选是 `Invariant MLP Full + HMM K=6`，可扩展图模型候选是 `Graph Full + HMM K=6`。二者都还不能当作行为准确率结论，因为尚无全新独立 trial 和人工行为标签验证。
+当前没有 TCN/RNN/Transformer；VAE 路线已经从活动实现中移除。
+`g_t=32` 是失败消融，默认仍为 64D。当前两只动物数据上，
+`Invariant MLP Full + HMM K=6` 是 retention 候选，
+`Invariant MLP Hybrid P2 + HMM K=6` 的 fixed-encoder stability 更高；可扩展
+图模型候选是 `Graph Full + HMM K=6`。这些排名都不能当作行为准确率结论，
+因为尚无全新独立 trial 和人工行为标签验证。
+
+旧的 0.16 s benchmark 现在只保留作历史对照。当前正式数字来自 0.04 s
+pointwise 重建；node/edge clock、encoder、PCA 和 downstream assignments 均已
+重新生成，不能把旧 assignments 直接重标为 0.04 s。
 
 ## 时间线
 
@@ -36,8 +46,11 @@ node + edge
 | 2026-10-14–16 | [06_GRAPH_PRESERVATION_AND_INITIAL_HMM_HSMM](06_GRAPH_PRESERVATION_AND_INITIAL_HMM_HSMM/README.md) | graph bottleneck、node preservation 与首套 HMM/HSMM | 形成 downstream 框架，6D 结果仅历史参考 |
 | 2026-10-16 | [07_9D_ALIGNMENT_AND_HYBRID_RERUN](07_9D_ALIGNMENT_AND_HYBRID_RERUN/README.md) | 新 9D latent 权威对齐、重训与时序模型复跑 | 证明 9D 数据链路可运行 |
 | 2026-10-19 | [08_9D_FULL_GNN_BENCHMARK](08_9D_FULL_GNN_BENCHMARK/README.md) | 63 个正式 GNN runs 与完整 retention/geometry 审计 | Graph Full 与 Hybrid P2 候选来源 |
-| 2026-10-19 | [09_INVARIANT_MLP_AND_DOWNSTREAM_BENCHMARK](09_INVARIANT_MLP_AND_DOWNSTREAM_BENCHMARK/README.md) | invariant MLP、四类聚类/时序模型、K 与 HSMM 检验 | 当前最新综合 benchmark |
-| 2026-10-20 | [10_ARI_STABILITY_DECOMPOSITION](10_ARI_STABILITY_DECOMPOSITION/README.md) | 分解 encoder-seed 与 downstream-seed 的 partition instability | representation variation 主导，但概率 downstream 也不稳定 |
+| 2026-10-19 | [09_INVARIANT_MLP_AND_DOWNSTREAM_BENCHMARK](09_INVARIANT_MLP_AND_DOWNSTREAM_BENCHMARK/README.md) | invariant MLP、四类聚类/时序模型、K 与 HSMM 检验 | 0.16 s 历史 benchmark |
+| 2026-10-20 | [10_ARI_STABILITY_DECOMPOSITION](10_ARI_STABILITY_DECOMPOSITION/README.md) | 分解 encoder-seed 与 downstream-seed 的 partition instability | 0.16 s 历史稳定性基线 |
+| 2026-10-22–23 | [11_POINTWISE_0P04_GNN_MLP_BENCHMARK](11_POINTWISE_0P04_GNN_MLP_BENCHMARK/README.md) | 0.04 s node/edge 重建，GNN/MLP 重训与 72-run HMM/HSMM benchmark | 当前综合 benchmark |
+| 2026-10-23 | [12_STICKY_HMM_PRIOR_SENSITIVITY](12_STICKY_HMM_PRIOR_SENSITIVITY/README.md) | 90 配置 prior strength/dwell sweep、soft transition-count audit 与状态复现性 | 当前 HMM 参数依据 |
+| 2026-11-01 | [13_STATE_ATLAS_V1](13_STATE_ATLAS_V1/README.md) | 冻结 K=12 状态的 directed edge atlas、quality/boundary QC 与四类视频采样 | 当前人工复核后端 |
 | 持续更新 | [90_CURRENT_GUIDES](90_CURRENT_GUIDES/README.md) | 当前 README 与 noob guide 快照 | 入门与操作入口 |
 
 ## 档案规则
@@ -53,5 +66,8 @@ node + edge
 - 第一次接触项目：先看 [90_CURRENT_GUIDES](90_CURRENT_GUIDES/README.md)。
 - 想知道为何不用 TCN/VAE/32D：看 02、04、08。
 - 想查 edge 是否真的进入了表示：看 05。
-- 想查当前模型选择、HMM/HSMM 结论和 instability 来源：看 08、09、10。
+- 想查当前 0.04 s 模型选择和 HMM/HSMM 结论：看 11。
+- 想查 sticky prior 到底有多强、参数为何保留 50000/2 s：看 12。
+- 想查当前 K=12 states 的定量特征、质量混杂和视频采样：看 13。
+- 想追溯旧 0.16 s instability 分解：看 09、10。
 - 想找本地未入 Git 的运行结果：看 [ARTIFACT_INDEX.md](ARTIFACT_INDEX.md)。

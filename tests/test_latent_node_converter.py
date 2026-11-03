@@ -51,7 +51,34 @@ class LatentNodeConverterTest(unittest.TestCase):
         )
         return path
 
-    def test_four_25hz_latents_are_weighted_into_each_point16_patch(self):
+    def test_default_clock_maps_each_25hz_latent_to_one_point(self):
+        values_a = np.arange(4, dtype=np.float32)[:, None]
+        values_b = values_a + 100.0
+        path_a = self._write_latent("point_A", values_a)
+        path_b = self._write_latent("point_B", values_b)
+        output = self.output_dir / "point_nodes.npz"
+
+        summary = convert_aligned_latents_to_node_npz(
+            [("A", path_a), ("B", path_b)],
+            output,
+            trial_id="pointwise",
+        )
+
+        self.assertEqual(summary["shape"], [4, 2, 1])
+        self.assertEqual(summary["aggregation"]["expected_samples_per_patch"], 1)
+        self.assertEqual(summary["aggregation"]["method"], "pointwise_sample")
+        with np.load(output, allow_pickle=False) as payload:
+            np.testing.assert_allclose(
+                payload["patch_start_s"], [0.96, 1.00, 1.04, 1.08]
+            )
+            np.testing.assert_allclose(
+                payload["patch_end_s"], [1.00, 1.04, 1.08, 1.12]
+            )
+            np.testing.assert_array_equal(payload["node_features"][:, 0], values_a)
+            np.testing.assert_array_equal(payload["node_features"][:, 1], values_b)
+            self.assertTrue(payload["node_mask"].all())
+
+    def test_explicit_historical_point16_aggregation_remains_reproducible(self):
         values_a = np.arange(8, dtype=np.float32)[:, None]
         values_b = values_a + 100.0
         path_a = self._write_latent(
@@ -65,6 +92,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             output,
             trial_id="weighted",
             output_identity=[1, 2],
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
             interpolated_weight=0.0,
             minimum_weight_coverage=0.5,
         )
@@ -96,6 +125,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             [("A", path_a), ("B", path_b)],
             output,
             trial_id="coverage",
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
             minimum_weight_coverage=0.5,
         )
         with np.load(output, allow_pickle=False) as payload:
@@ -115,6 +146,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             [("A", path_a), ("B", path_b)],
             output,
             trial_id="fraction",
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
             interpolated_weight=0.25,
         )
         with np.load(output, allow_pickle=False) as payload:
@@ -153,6 +186,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             [("A", path_a), ("B", path_b)],
             output,
             trial_id="trim",
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
         )
         self.assertEqual(summary["shape"], [2, 2, 1])
         self.assertEqual(
@@ -175,6 +210,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             node_path,
             trial_id="package",
             output_identity=[1, 2],
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
         )
         with np.load(node_path, allow_pickle=False) as node:
             edge_path = self.output_dir / "package_edges.npz"
@@ -212,6 +249,8 @@ class LatentNodeConverterTest(unittest.TestCase):
             output,
             trial_id="authoritative",
             authoritative_clock_npz=clock_path,
+            patch_duration_s=0.16,
+            patch_stride_s=0.16,
         )
         with np.load(output, allow_pickle=False) as payload:
             np.testing.assert_array_equal(payload["patch_start_s"], starts)
@@ -222,6 +261,43 @@ class LatentNodeConverterTest(unittest.TestCase):
             )
             np.testing.assert_array_equal(payload["node_features"][[0, 3]], 0.0)
         self.assertEqual(summary["qc"]["missing_patch_count_by_identity"], [2, 2])
+
+    def test_explicit_clock_can_preserve_missing_boundary_rows(self):
+        time = 1.04 + np.arange(4, dtype=np.float64) * 0.04
+        values = np.arange(4, dtype=np.float32)[:, None]
+        path_a = self._write_latent("explicit_A", values, time=time)
+        path_b = self._write_latent("explicit_B", values + 100.0, time=time)
+        output = self.output_dir / "explicit_nodes.npz"
+
+        summary = convert_aligned_latents_to_node_npz(
+            [("A", path_a), ("B", path_b)],
+            output,
+            trial_id="explicit-clock",
+            clock_start_s=0.96,
+            clock_end_s=1.28,
+            allow_clock_outside_latent_support=True,
+        )
+
+        self.assertEqual(summary["clock"]["mode"], "explicit_fixed_intervals")
+        with np.load(output, allow_pickle=False) as payload:
+            np.testing.assert_allclose(
+                payload["patch_start_s"],
+                [0.96, 1.00, 1.04, 1.08, 1.12, 1.16, 1.20, 1.24],
+            )
+            self.assertEqual(
+                payload["node_mask"].tolist(),
+                [
+                    [False, False],
+                    [False, False],
+                    [True, True],
+                    [True, True],
+                    [True, True],
+                    [True, True],
+                    [False, False],
+                    [False, False],
+                ],
+            )
+            np.testing.assert_array_equal(payload["node_features"][[0, 1, 6, 7]], 0.0)
 
     def test_authoritative_clock_rejects_wrong_source_identity_order(self):
         values = np.arange(8, dtype=np.float32)[:, None]
@@ -241,6 +317,30 @@ class LatentNodeConverterTest(unittest.TestCase):
                 [("A", path_a), ("B", path_b)],
                 self.output_dir / "order_nodes.npz",
                 trial_id="order",
+                authoritative_clock_npz=clock_path,
+                patch_duration_s=0.16,
+                patch_stride_s=0.16,
+            )
+
+    def test_default_pointwise_mode_rejects_old_point16_clock(self):
+        values = np.arange(8, dtype=np.float32)[:, None]
+        path_a = self._write_latent("old_clock_A", values)
+        path_b = self._write_latent("old_clock_B", values + 100.0)
+        clock_path = self.output_dir / "old_point16_clock.npz"
+        starts = np.asarray([0.96, 1.12], dtype=np.float64)
+        np.savez_compressed(
+            clock_path,
+            trial_id=np.asarray("old-clock"),
+            patch_start_s=starts,
+            patch_end_s=starts + 0.16,
+            identity=np.asarray([1, 2]),
+            source_identity=np.asarray(["A", "B"]),
+        )
+        with self.assertRaisesRegex(LatentNodeConversionError, "expected 0.04"):
+            convert_aligned_latents_to_node_npz(
+                [("A", path_a), ("B", path_b)],
+                self.output_dir / "old_clock_nodes.npz",
+                trial_id="old-clock",
                 authoritative_clock_npz=clock_path,
             )
 

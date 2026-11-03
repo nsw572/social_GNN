@@ -168,4 +168,5 @@ edge_extraction:
   # Displacements below this patch-to-patch noise floor reduce movement
   # direction alignment confidence.
   minimum_patch_displacement_px: 1.0
+  expected_timestep_s: 0.04
   save_frame_level: true

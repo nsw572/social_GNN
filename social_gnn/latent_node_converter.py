@@ -1,9 +1,10 @@
-"""Aggregate aligned per-sample IMU latents onto the fixed social clock.
+"""Place aligned per-sample IMU latents on the fixed social clock.
 
 The mature upstream latent files contain one ``downstream`` vector every
-approximately 0.04 seconds.  Social-GNN uses one graph every 0.16 seconds, so
-this converter computes one validity-weighted node vector per animal and
-social patch without changing the stored upstream files.
+approximately 0.04 seconds. Social-GNN now uses the same 0.04-second pointwise
+grid, so a canonical node timestep normally contains exactly one upstream
+latent vector. Explicit non-default durations remain available only for
+historical reproducibility.
 """
 
 from __future__ import annotations
@@ -17,14 +18,24 @@ from typing import Any, Sequence
 import numpy as np
 
 try:
-    from .authoritative_clock import load_node_clock, validate_fixed_patch_grid
+    from .authoritative_clock import (
+        CANONICAL_SOCIAL_TIMESTEP_S,
+        load_node_clock,
+        validate_fixed_patch_grid,
+        validate_social_timestep,
+    )
 except ImportError:  # pragma: no cover - direct script execution
-    from authoritative_clock import load_node_clock, validate_fixed_patch_grid
+    from authoritative_clock import (
+        CANONICAL_SOCIAL_TIMESTEP_S,
+        load_node_clock,
+        validate_fixed_patch_grid,
+        validate_social_timestep,
+    )
 
 
 NODE_CONTRACT_VERSION = "social_node_features_v0"
-DEFAULT_PATCH_DURATION_S = 0.16
-DEFAULT_PATCH_STRIDE_S = 0.16
+DEFAULT_PATCH_DURATION_S = CANONICAL_SOCIAL_TIMESTEP_S
+DEFAULT_PATCH_STRIDE_S = CANONICAL_SOCIAL_TIMESTEP_S
 
 
 class LatentNodeConversionError(ValueError):
@@ -241,6 +252,7 @@ def _fixed_clock(
     patch_stride_s: float,
     clock_start_s: float | None,
     clock_end_s: float | None,
+    allow_outside_source_support: bool,
     trial_id: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     for name, value in (
@@ -256,12 +268,12 @@ def _fixed_clock(
     if not np.isfinite(start_s) or not np.isfinite(end_s) or end_s <= start_s:
         raise _fail(trial_id, "clock bounds must be finite with end greater than start")
     tolerance = max(1e-9, sample_period_s * 1e-6)
-    if start_s < first_sample_s - tolerance:
+    if not allow_outside_source_support and start_s < first_sample_s - tolerance:
         raise _fail(
             trial_id,
             f"clock_start_s {start_s} precedes first latent time {first_sample_s}",
         )
-    if end_s > source_end_s + tolerance:
+    if not allow_outside_source_support and end_s > source_end_s + tolerance:
         raise _fail(
             trial_id,
             f"clock_end_s {end_s} exceeds latent support end {source_end_s}",
@@ -382,6 +394,7 @@ def convert_aligned_latents_to_node_npz(
     clock_start_s: float | None = None,
     clock_end_s: float | None = None,
     authoritative_clock_npz: str | Path | None = None,
+    allow_clock_outside_latent_support: bool = False,
     interpolated_weight: float = 0.0,
     minimum_weight_coverage: float = 0.5,
     allow_duplicate_nodes: bool = False,
@@ -449,6 +462,30 @@ def convert_aligned_latents_to_node_npz(
                 "authoritative clock trial_id "
                 f"{reference_clock_meta['trial_id']!r} does not match",
             )
+        try:
+            validate_social_timestep(
+                reference_clock_meta,
+                expected_timestep_s=float(patch_duration_s),
+                label="authoritative node clock",
+            )
+        except ValueError as exc:
+            raise _fail(
+                resolved_id,
+                f"{exc}. Rebuild the authoritative clock at 0.04 s, or pass "
+                "matching explicit patch duration/stride only for historical "
+                "reproduction.",
+            ) from exc
+        if not np.isclose(
+            float(patch_stride_s),
+            float(patch_duration_s),
+            rtol=1e-7,
+            atol=1e-9,
+        ):
+            raise _fail(
+                resolved_id,
+                "pointwise Social-GNN requires patch_stride_s == "
+                "patch_duration_s",
+            )
         patch_duration_s = float(reference_clock_meta["patch_duration_s"])
         patch_stride_meta = reference_clock_meta["patch_stride_s"]
         patch_stride_s = (
@@ -487,6 +524,7 @@ def convert_aligned_latents_to_node_npz(
             patch_stride_s=float(patch_stride_s),
             clock_start_s=clock_start_s,
             clock_end_s=clock_end_s,
+            allow_outside_source_support=allow_clock_outside_latent_support,
             trial_id=resolved_id,
         )
         social_step = np.arange(len(patch_start_s), dtype=np.int64)
@@ -538,7 +576,10 @@ def convert_aligned_latents_to_node_npz(
             minimum_weight_coverage=minimum_weight_coverage,
             timestamp_tolerance_s=timestamp_tolerance_s,
             sample_period_s=sample_period_s,
-            permit_outside_source_support=authoritative_clock_npz is not None,
+            permit_outside_source_support=(
+                authoritative_clock_npz is not None
+                or allow_clock_outside_latent_support
+            ),
             trial_id=resolved_id,
         )
         node_features.append(features)
@@ -613,6 +654,9 @@ def convert_aligned_latents_to_node_npz(
             if authoritative_clock_npz is None
             else str(Path(authoritative_clock_npz).resolve())
         ),
+        allow_clock_outside_latent_support=np.asarray(
+            allow_clock_outside_latent_support
+        ),
     )
 
     summary_path = (
@@ -635,7 +679,11 @@ def convert_aligned_latents_to_node_npz(
             "mode": (
                 "authoritative_node_intervals"
                 if authoritative_clock_npz is not None
-                else "generated_from_latent_support"
+                else (
+                    "explicit_fixed_intervals"
+                    if clock_start_s is not None or clock_end_s is not None
+                    else "generated_from_latent_support"
+                )
             ),
             "source_node_npz": (
                 None
@@ -654,7 +702,11 @@ def convert_aligned_latents_to_node_npz(
             "patch_stride_s": float(patch_stride_s),
         },
         "aggregation": {
-            "method": "validity_weighted_mean",
+            "method": (
+                "pointwise_sample"
+                if expected_samples == 1
+                else "validity_weighted_mean_historical_override"
+            ),
             "latent_sample_period_s": sample_period_s,
             "expected_samples_per_patch": expected_samples,
             "interpolated_weight": float(interpolated_weight),
@@ -705,8 +757,8 @@ def _identity_label(value: str) -> Any:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Aggregate aligned per-animal latent NPZ files onto a fixed 0.16 s "
-            "Social-GNN node clock."
+            "Place aligned per-animal latent NPZ files onto the fixed 0.04 s "
+            "pointwise Social-GNN node clock."
         )
     )
     parser.add_argument("--animal", action="append", type=_parse_animal, required=True)
@@ -724,6 +776,14 @@ def parse_args() -> argparse.Namespace:
             "Existing canonical node NPZ whose complete patch clock and identity "
             "order must be preserved. Patches outside latent support remain in "
             "the output with node_mask=false."
+        ),
+    )
+    parser.add_argument(
+        "--allow-clock-outside-latent-support",
+        action="store_true",
+        help=(
+            "Preserve explicitly supplied clock bounds beyond latent support and "
+            "mark those node rows invalid instead of shortening the physical trial."
         ),
     )
     parser.add_argument("--interpolated-weight", type=float, default=0.0)
@@ -746,6 +806,9 @@ def main() -> int:
             clock_start_s=args.clock_start_s,
             clock_end_s=args.clock_end_s,
             authoritative_clock_npz=args.authoritative_clock_npz,
+            allow_clock_outside_latent_support=(
+                args.allow_clock_outside_latent_support
+            ),
             interpolated_weight=args.interpolated_weight,
             minimum_weight_coverage=args.minimum_weight_coverage,
             allow_duplicate_nodes=args.allow_duplicate_nodes,

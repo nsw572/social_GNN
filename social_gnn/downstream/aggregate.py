@@ -173,6 +173,7 @@ def _aggregate_runs(completed: pd.DataFrame, stability: pd.DataFrame) -> pd.Data
         "bout_duration_q90_s",
         "fraction_one_timestep_bouts",
         "fraction_bouts_at_duration_cap",
+        "mean_self_transition_probability",
         "observed_mean_bout_patches",
         "fitted_duration_expected_patches",
         "fitted_to_observed_duration_ratio",

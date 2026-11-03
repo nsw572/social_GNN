@@ -1,0 +1,28 @@
+contract: social_gnn_hmm_k12_k14_final_selection_v1
+architecture: graph_full
+encoder_seeds: [20261013, 20261029, 20261107]
+hmm_seeds: [0, 1, 2]
+k_values: [12, 13, 14]
+observation_dim: 16
+timestep_s: 0.04
+train_trials: [A1_C1, A3_C3, A4_B4]
+development_trial: A4_C4
+excluded_trial: A5_C5
+emissions: diagonal_gaussian
+target_dwell_s: 2.0
+target_self_transition: 0.98
+primary_prior:
+  policy: fixed
+  strength_per_source_row: 50000
+secondary_prior:
+  policy: normalized_6_over_k
+  formula: 50000 * 6 / K
+fit:
+  max_iter: 40
+  tolerance: 0.0001
+  covariance_floor: 0.001
+decision:
+  cross_encoder_mean_ari_tolerance: 0.02
+  within_encoder_mean_ari_tolerance: 0.03
+  parsimony_if_tied: true
+output_dir: evaluation_runs/gnn_9dim_0p04_downstream_v2/k12_k13_k14_final_selection

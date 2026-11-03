@@ -7,7 +7,10 @@ from pathlib import Path
 import numpy as np
 from scipy.special import logsumexp
 
-from social_gnn.downstream.embeddings import FrozenEmbeddingTrial
+from social_gnn.downstream.embeddings import (
+    FrozenEmbeddingTrial,
+    validate_embedding_timestep,
+)
 from social_gnn.downstream.evaluation import (
     DecodedTrial,
     bout_rows,
@@ -37,6 +40,12 @@ def make_trial(trial_id="trial", values=None, valid=None, duration=0.32, stride=
 
 
 class DownstreamTemporalTest(unittest.TestCase):
+    def test_downstream_timestep_must_match_embedding_clock(self):
+        pointwise = make_trial(duration=0.04, stride=0.04)
+        validate_embedding_timestep([pointwise], 0.04)
+        with self.assertRaisesRegex(ValueError, "duration does not match"):
+            validate_embedding_timestep([pointwise], 0.16)
+
     def test_embedding_dimensions_and_chronology_are_strict(self):
         with self.assertRaisesRegex(ValueError, r"shape \[T,D\]"):
             make_trial(values=np.zeros(3, dtype=np.float32))
@@ -199,8 +208,43 @@ class DownstreamTemporalTest(unittest.TestCase):
             loaded, metadata = GaussianHMM.load(path)
             np.testing.assert_allclose(first.predict(sequences[0]), loaded.predict(sequences[0]))
             self.assertEqual(metadata["purpose"], "test")
+            self.assertAlmostEqual(loaded.timestep_s, 0.04)
+            self.assertAlmostEqual(loaded.sticky_expected_duration_s, 2.0)
+            self.assertAlmostEqual(loaded.sticky_prior_strength, 50000.0)
         finally:
             shutil.rmtree(directory, ignore_errors=True)
+
+    def test_sticky_hmm_prior_is_derived_from_physical_duration(self):
+        model = GaussianHMM(
+            3,
+            timestep_s=0.04,
+            sticky_expected_duration_s=2.0,
+            sticky_prior_strength=10.0,
+            transition_pseudocount=0.01,
+            seed=4,
+        )
+        self.assertAlmostEqual(model.sticky_self_transition_probability, 0.98)
+        prior = model.transition_prior_counts()
+        np.testing.assert_allclose(np.diag(prior), 0.01 + 10.0 * 0.98)
+        np.testing.assert_allclose(prior[~np.eye(3, dtype=bool)], 0.01 + 10.0 * 0.01)
+
+        sequence = np.asarray(
+            [[-2.0], [-1.9], [-0.1], [0.0], [2.0], [2.1]], dtype=np.float64
+        )
+        model._initialize([sequence])
+        np.testing.assert_allclose(np.diag(model.transition_), 0.98)
+        np.testing.assert_allclose(
+            model.transition_[~np.eye(3, dtype=bool)], 0.01
+        )
+
+    def test_sticky_duration_shorter_than_timestep_is_rejected(self):
+        model = GaussianHMM(
+            2,
+            timestep_s=0.04,
+            sticky_expected_duration_s=0.02,
+        )
+        with self.assertRaisesRegex(ValueError, ">= timestep_s"):
+            _ = model.sticky_self_transition_probability
 
     def test_hsmm_checkpoint_roundtrip(self):
         model = GaussianHSMM(n_states=2, max_duration=4, seed=7)

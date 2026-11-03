@@ -261,6 +261,9 @@ class VideoFeaturePipelineTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--minimum-patch-displacement-px") + 1], "2.5"
         )
+        self.assertEqual(
+            command[command.index("--expected-timestep-s") + 1], "0.04"
+        )
         self.assertNotIn("--patch-length-s", command)
         self.assertNotIn("--patch-count", command)
 

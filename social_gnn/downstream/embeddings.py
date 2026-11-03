@@ -7,18 +7,9 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
-import torch
-
-from social_gnn.evaluation import (
-    apply_native_edge_mode,
-    encode_package,
-    load_encoder,
-    load_trials,
-    make_random_encoder,
-)
 
 
 @dataclass(frozen=True)
@@ -166,7 +157,32 @@ def load_embedding_directory(path: str | Path) -> list[FrozenEmbeddingTrial]:
     return trials
 
 
-def _device(name: str) -> torch.device:
+def validate_embedding_timestep(
+    trials: Iterable[FrozenEmbeddingTrial], expected_timestep_s: float
+) -> None:
+    """Reject embeddings whose physical clock does not match downstream settings."""
+    expected = float(expected_timestep_s)
+    if not np.isfinite(expected) or expected <= 0:
+        raise ValueError("expected_timestep_s must be positive and finite")
+    for trial in trials:
+        durations = trial.patch_end_s - trial.patch_start_s
+        if not np.allclose(durations, expected, rtol=1e-7, atol=1e-9):
+            raise ValueError(
+                f"{trial.trial_id}: embedding patch duration does not match "
+                f"HMM timestep {expected} s"
+            )
+        if len(trial.patch_start_s) > 1 and not np.allclose(
+            np.diff(trial.patch_start_s), expected, rtol=1e-7, atol=1e-9
+        ):
+            raise ValueError(
+                f"{trial.trial_id}: embedding patch stride does not match "
+                f"HMM timestep {expected} s"
+            )
+
+
+def _device(name: str):
+    import torch
+
     if name == "auto":
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device = torch.device(name)
@@ -191,15 +207,53 @@ def extract_frozen_embeddings(
     device_name: str = "auto",
     chunk_size: int = 4096,
     random_seed: int | None = None,
+    trial_ids: Sequence[str] | None = None,
+    holdout_release_token: str | None = None,
 ) -> dict[str, Any]:
     """Extract full-clock embeddings and keep invalid patches explicit."""
+
+    from social_gnn.evaluation import (
+        apply_native_edge_mode,
+        encode_package,
+        load_encoder,
+        load_trials,
+        make_random_encoder,
+    )
 
     config_path = Path(experiment_config).resolve()
     checkpoint_path = Path(checkpoint).resolve()
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    from social_gnn.holdout import (
+        HOLDOUT_RELEASE_TOKEN,
+        LOCKED_9D_CONFIRMATORY_TRIALS,
+        assert_9d_holdout_access,
+        default_embedding_trial_ids,
+    )
+
     config, packages = load_trials(config_path)
     first = packages[0]
+    available = {package.trial_id: package for package in packages}
+    if trial_ids is None:
+        selected_ids = default_embedding_trial_ids(
+            available,
+            node_dim=first.node_features.shape[-1],
+            excluded_trial_ids=config.get("split", {}).get("excluded_trials", []),
+        )
+    else:
+        selected_ids = tuple(str(value) for value in trial_ids)
+        unknown = sorted(set(selected_ids) - set(available))
+        if unknown:
+            raise ValueError(f"unknown embedding export trial IDs: {unknown}")
+        assert_9d_holdout_access(
+            selected_ids,
+            node_dim=first.node_features.shape[-1],
+            release_token=holdout_release_token,
+            context="frozen embedding export",
+        )
+    packages = [available[trial_id] for trial_id in selected_ids]
+    if not packages:
+        raise ValueError("embedding export selected no trials")
     device = _device(device_name)
     reference_encoder = load_encoder(
         checkpoint_path,
@@ -280,6 +334,13 @@ def extract_frozen_embeddings(
         "embedding_dim": int(records[0]["shape"][1]),
         "device": str(device),
         "split": config.get("split", {}),
+        "holdout_policy": {
+            "locked_9d_confirmatory_trials": sorted(
+                LOCKED_9D_CONFIRMATORY_TRIALS
+            ),
+            "release_used": holdout_release_token == HOLDOUT_RELEASE_TOKEN,
+            "exported_trial_ids": list(selected_ids),
+        },
         "training_trials": [
             package.trial_id
             for package in packages
@@ -327,6 +388,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--chunk-size", type=int, default=4096)
     parser.add_argument(
+        "--trial",
+        action="append",
+        help="Explicit trial to export; repeat as needed. Defaults exclude locked holdouts.",
+    )
+    parser.add_argument(
+        "--holdout-release-token",
+        help="Explicit protocol release required to export a locked 9D holdout.",
+    )
+    parser.add_argument(
         "--random-seed",
         type=int,
         help="Export a deterministic untrained architecture control using this seed",
@@ -343,6 +413,8 @@ def main() -> int:
         device_name=args.device,
         chunk_size=args.chunk_size,
         random_seed=args.random_seed,
+        trial_ids=args.trial,
+        holdout_release_token=args.holdout_release_token,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0

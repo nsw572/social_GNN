@@ -9,6 +9,9 @@ from typing import Any
 import numpy as np
 
 
+CANONICAL_SOCIAL_TIMESTEP_S = 0.04
+
+
 def validate_fixed_patch_grid(
     patch_start_s: np.ndarray,
     patch_end_s: np.ndarray,
@@ -67,6 +70,31 @@ def validate_fixed_patch_grid(
         "patch_stride_s": float(strides[0]) if strides.size else None,
         "overlapping": bool(strides.size and strides[0] < durations[0]),
     }
+
+
+def validate_social_timestep(
+    clock_metadata: dict[str, Any],
+    *,
+    expected_timestep_s: float = CANONICAL_SOCIAL_TIMESTEP_S,
+    label: str = "authoritative clock",
+) -> None:
+    """Require non-overlapping pointwise bins at the configured resolution."""
+    expected = float(expected_timestep_s)
+    if not np.isfinite(expected) or expected <= 0:
+        raise ValueError("expected_timestep_s must be positive and finite")
+    duration = float(clock_metadata["patch_duration_s"])
+    stride_value = clock_metadata.get("patch_stride_s")
+    stride = duration if stride_value is None else float(stride_value)
+    if not np.isclose(duration, expected, rtol=1e-7, atol=1e-9):
+        raise ValueError(
+            f"{label}: patch duration is {duration:.12g} s, expected "
+            f"{expected:.12g} s"
+        )
+    if not np.isclose(stride, expected, rtol=1e-7, atol=1e-9):
+        raise ValueError(
+            f"{label}: patch stride is {stride:.12g} s, expected "
+            f"{expected:.12g} s"
+        )
 
 
 def load_node_clock(

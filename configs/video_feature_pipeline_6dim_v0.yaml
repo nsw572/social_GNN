@@ -153,4 +153,5 @@ edge_extraction:
   script: 'C:\Users\DELL\Desktop\deepOF\social_gnn\edge_extraction.py'
   clock_node_npz: null
   minimum_patch_displacement_px: 1.0
+  expected_timestep_s: 0.04
   save_frame_level: false

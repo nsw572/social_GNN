@@ -24,7 +24,9 @@ import pandas as pd
 from .ari_stability import AssignmentData, load_assignment, run_id
 
 
-DEFAULT_TRIALS = ("A1_C1", "A3_C3", "A4_B4", "A4_C4", "A5_C5")
+# A5_C5 is a locked 9D confirmatory holdout.  It must be supplied explicitly
+# only after the final encoder/downstream protocol has been frozen.
+DEFAULT_TRIALS = ("A1_C1", "A3_C3", "A4_B4", "A4_C4")
 
 
 @dataclass(frozen=True)

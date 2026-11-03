@@ -11,9 +11,18 @@ embedding:
   name: g_t
   temporal_encoder: none
   export_for_downstream: true
+social_clock:
+  duration_s: 0.04
+  stride_s: 0.04
+  node_mode: pointwise_upstream_latent
+  edge_mode: frame_traits_on_same_half_open_interval
 downstream:
   examples: [clustering, hmm, hsmm]
   train_with_gnn: false
+  hmm:
+    timestep_s: 0.04
+    sticky_expected_duration_s: 2.0
+    sticky_prior_strength: 10.0
 ssl:
   type: masked_multimodal_reconstruction
   node_mask_probability: 0.15

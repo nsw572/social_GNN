@@ -108,6 +108,9 @@ class GaussianHMM:
     covariance_floor: float = 1e-3
     transition_pseudocount: float = 1e-2
     initial_pseudocount: float = 1e-2
+    timestep_s: float = 0.04
+    sticky_expected_duration_s: float | None = 2.0
+    sticky_prior_strength: float = 50000.0
     seed: int = 0
     initial_: np.ndarray | None = None
     transition_: np.ndarray | None = None
@@ -127,6 +130,46 @@ class GaussianHMM:
     def n_features(self) -> int:
         self._check_fitted()
         return int(self.means_.shape[1])
+
+    @property
+    def sticky_self_transition_probability(self) -> float | None:
+        """Target self-transition implied by the physical dwell-time prior.
+
+        For a geometric HMM bout, ``E[duration] = dt / (1 - p_self)``.
+        Thus a 2 s target at a 0.04 s timestep gives ``p_self = 0.98``.
+        ``None`` disables the sticky component and preserves the historical
+        isotropic transition prior.
+        """
+        if self.sticky_expected_duration_s is None:
+            return None
+        timestep = float(self.timestep_s)
+        duration = float(self.sticky_expected_duration_s)
+        if not np.isfinite(timestep) or timestep <= 0:
+            raise ValueError("timestep_s must be positive and finite")
+        if not np.isfinite(duration) or duration < timestep:
+            raise ValueError(
+                "sticky_expected_duration_s must be finite and >= timestep_s"
+            )
+        return float(np.clip(1.0 - timestep / duration, 0.0, 1.0 - 1e-9))
+
+    def transition_prior_counts(self) -> np.ndarray:
+        """Return the isotropic plus sticky Dirichlet pseudocount matrix."""
+        if not np.isfinite(self.transition_pseudocount) or self.transition_pseudocount < 0:
+            raise ValueError("transition_pseudocount must be non-negative and finite")
+        if not np.isfinite(self.sticky_prior_strength) or self.sticky_prior_strength < 0:
+            raise ValueError("sticky_prior_strength must be non-negative and finite")
+        prior = np.full(
+            (self.n_states, self.n_states),
+            float(self.transition_pseudocount),
+            dtype=np.float64,
+        )
+        probability = self.sticky_self_transition_probability
+        if probability is None or self.sticky_prior_strength == 0:
+            return prior
+        off_diagonal = (1.0 - probability) / max(self.n_states - 1, 1)
+        target = np.full((self.n_states, self.n_states), off_diagonal)
+        np.fill_diagonal(target, probability)
+        return prior + float(self.sticky_prior_strength) * target
 
     def _initialize(self, sequences: list[np.ndarray]) -> None:
         if self.n_states < 2:
@@ -155,9 +198,11 @@ class GaussianHMM:
             ]
         )
         self.initial_ = np.full(self.n_states, 1.0 / self.n_states)
-        off = 0.10 / max(self.n_states - 1, 1)
+        sticky_probability = self.sticky_self_transition_probability
+        diagonal = 0.90 if sticky_probability is None else sticky_probability
+        off = (1.0 - diagonal) / max(self.n_states - 1, 1)
         self.transition_ = np.full((self.n_states, self.n_states), off)
-        np.fill_diagonal(self.transition_, 0.90)
+        np.fill_diagonal(self.transition_, diagonal)
         self.transition_ /= self.transition_.sum(axis=1, keepdims=True)
 
     def emission_log_probability(self, sequence: np.ndarray) -> np.ndarray:
@@ -185,9 +230,7 @@ class GaussianHMM:
         previous = -np.inf
         for _iteration in range(max_iter):
             initial_counts = np.full(self.n_states, self.initial_pseudocount)
-            transition_counts = np.full(
-                (self.n_states, self.n_states), self.transition_pseudocount
-            )
+            transition_counts = self.transition_prior_counts()
             state_weight = np.zeros(self.n_states)
             first_moment = np.zeros_like(self.means_)
             second_moment = np.zeros_like(self.means_)
@@ -242,6 +285,30 @@ class GaussianHMM:
             total += likelihood
         return float(total)
 
+    def expected_transition_counts(
+        self, sequences: Iterable[np.ndarray]
+    ) -> np.ndarray:
+        """Return posterior expected transition counts for fitted sequences.
+
+        These are the soft ``xi`` counts used by the EM transition update,
+        summed across sequences without inserting transitions at sequence
+        boundaries.  The returned matrix excludes all prior pseudocounts.
+        """
+
+        values = _validate_sequences(sequences)
+        self._check_fitted()
+        log_initial = np.log(np.maximum(self.initial_, 1e-300))
+        log_transition = np.log(np.maximum(self.transition_, 1e-300))
+        counts = np.zeros((self.n_states, self.n_states), dtype=np.float64)
+        for sequence in values:
+            _alpha, _gamma, _likelihood, xi = _forward_backward(
+                self.emission_log_probability(sequence),
+                log_initial,
+                log_transition,
+            )
+            counts += xi
+        return counts
+
     def posterior(self, sequence: np.ndarray) -> np.ndarray:
         self._check_fitted()
         _alpha, gamma, _likelihood, _xi = _forward_backward(
@@ -274,11 +341,18 @@ class GaussianHMM:
         output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             output,
-            model_type=np.asarray("gaussian_hmm_v1"),
+            model_type=np.asarray("gaussian_hmm_v2"),
             n_states=np.asarray(self.n_states),
             covariance_floor=np.asarray(self.covariance_floor),
             transition_pseudocount=np.asarray(self.transition_pseudocount),
             initial_pseudocount=np.asarray(self.initial_pseudocount),
+            timestep_s=np.asarray(self.timestep_s),
+            sticky_expected_duration_s=np.asarray(
+                np.nan
+                if self.sticky_expected_duration_s is None
+                else self.sticky_expected_duration_s
+            ),
+            sticky_prior_strength=np.asarray(self.sticky_prior_strength),
             seed=np.asarray(self.seed),
             initial=self.initial_,
             transition=self.transition_,
@@ -293,13 +367,32 @@ class GaussianHMM:
     @classmethod
     def load(cls, path: str | Path) -> tuple["GaussianHMM", dict]:
         with np.load(path, allow_pickle=False) as data:
-            if str(data["model_type"].item()) != "gaussian_hmm_v1":
+            model_type = str(data["model_type"].item())
+            if model_type not in {"gaussian_hmm_v1", "gaussian_hmm_v2"}:
                 raise ValueError(f"{path} is not a GaussianHMM checkpoint")
+            sticky_duration = (
+                float(data["sticky_expected_duration_s"])
+                if "sticky_expected_duration_s" in data.files
+                else float("nan")
+            )
             model = cls(
                 n_states=int(data["n_states"]),
                 covariance_floor=float(data["covariance_floor"]),
                 transition_pseudocount=float(data["transition_pseudocount"]),
                 initial_pseudocount=float(data["initial_pseudocount"]),
+                timestep_s=(
+                    float(data["timestep_s"])
+                    if "timestep_s" in data.files
+                    else 0.16
+                ),
+                sticky_expected_duration_s=(
+                    None if not np.isfinite(sticky_duration) else sticky_duration
+                ),
+                sticky_prior_strength=(
+                    float(data["sticky_prior_strength"])
+                    if "sticky_prior_strength" in data.files
+                    else 0.0
+                ),
                 seed=int(data["seed"]),
             )
             model.initial_ = np.asarray(data["initial"], dtype=np.float64)

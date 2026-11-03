@@ -10,6 +10,7 @@ from social_gnn.data import SocialTrialPackage, collate_social_trials
 from social_gnn.experiment import (
     _build_model,
     _run_definitions,
+    _validate_package_clocks,
     apply_edge_mode,
     fit_feature_standardizer,
     run_experiment,
@@ -74,6 +75,18 @@ def write_package(root: Path, package: SocialTrialPackage):
 
 
 class SocialExperimentTest(unittest.TestCase):
+    def test_optional_experiment_clock_rejects_wrong_resolution(self):
+        package = make_package("clock", 4)
+        _validate_package_clocks(
+            {"clock": {"patch_duration_s": 0.16, "patch_stride_s": 0.16}},
+            [package],
+        )
+        with self.assertRaisesRegex(ValueError, "duration does not match"):
+            _validate_package_clocks(
+                {"clock": {"patch_duration_s": 0.04, "patch_stride_s": 0.04}},
+                [package],
+            )
+
     def setUp(self):
         self.root = Path("social_gnn") / f"_test_experiment_{uuid.uuid4().hex}"
         self.root.mkdir(parents=True)

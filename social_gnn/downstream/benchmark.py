@@ -16,7 +16,11 @@ from threadpoolctl import threadpool_limits
 
 from social_gnn.evaluation import TRAIT_NAMES, load_trials
 
-from .embeddings import FrozenEmbeddingTrial, load_embedding_directory
+from .embeddings import (
+    FrozenEmbeddingTrial,
+    load_embedding_directory,
+    validate_embedding_timestep,
+)
 from .evaluation import DecodedTrial, bout_rows, decode_trial, segmentation_metrics, stability_metrics
 from .gaussian_hmm import GaussianHMM
 from .gaussian_hsmm import GaussianHSMM
@@ -50,6 +54,9 @@ def _fit_model(
     *,
     covariance_floor: float,
     hmm_max_iter: int,
+    hmm_timestep_s: float,
+    hmm_sticky_expected_duration_s: float | None,
+    hmm_sticky_prior_strength: float,
     hsmm_max_iter: int,
     gmm_max_iter: int,
     tolerance: float,
@@ -69,6 +76,9 @@ def _fit_model(
         return GaussianHMM(
             n_states=states,
             covariance_floor=covariance_floor,
+            timestep_s=hmm_timestep_s,
+            sticky_expected_duration_s=hmm_sticky_expected_duration_s,
+            sticky_prior_strength=hmm_sticky_prior_strength,
             seed=seed,
         ).fit(sequences, max_iter=hmm_max_iter, tolerance=tolerance)
     if algorithm == "hsmm":
@@ -259,6 +269,9 @@ def run_downstream_benchmark(
     pca_dim: int = 16,
     covariance_floor: float = 1e-3,
     hmm_max_iter: int = 40,
+    hmm_timestep_s: float = 0.04,
+    hmm_sticky_expected_duration_s: float | None = 2.0,
+    hmm_sticky_prior_strength: float = 50000.0,
     hsmm_max_iter: int = 20,
     gmm_max_iter: int = 100,
     tolerance: float = 1e-4,
@@ -272,6 +285,7 @@ def run_downstream_benchmark(
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     trials = load_embedding_directory(embedding_dir)
+    validate_embedding_timestep(trials, hmm_timestep_s)
     by_id = {trial.trial_id: trial for trial in trials}
     requested = set(train_trial_ids) | set(validation_trial_ids)
     missing = sorted(requested - set(by_id))
@@ -313,6 +327,17 @@ def run_downstream_benchmark(
                         "downstream_seed": int(seed),
                         "K": int(states),
                         "max_duration_patches": max_duration,
+                        "hmm_timestep_s": (
+                            hmm_timestep_s if algorithm == "hmm" else None
+                        ),
+                        "hmm_sticky_expected_duration_s": (
+                            hmm_sticky_expected_duration_s
+                            if algorithm == "hmm"
+                            else None
+                        ),
+                        "hmm_sticky_prior_strength": (
+                            hmm_sticky_prior_strength if algorithm == "hmm" else None
+                        ),
                         "pca_dim": int(preprocessor.output_dim),
                         "status": "failed",
                     }
@@ -326,6 +351,11 @@ def run_downstream_benchmark(
                                 train_sequences,
                                 covariance_floor=covariance_floor,
                                 hmm_max_iter=hmm_max_iter,
+                                hmm_timestep_s=hmm_timestep_s,
+                                hmm_sticky_expected_duration_s=(
+                                    hmm_sticky_expected_duration_s
+                                ),
+                                hmm_sticky_prior_strength=hmm_sticky_prior_strength,
                                 hsmm_max_iter=hsmm_max_iter,
                                 gmm_max_iter=gmm_max_iter,
                                 tolerance=tolerance,
@@ -404,6 +434,11 @@ def run_downstream_benchmark(
                             "parameter_count": parameter_count,
                             "iterations": _iterations(model),
                             "converged": bool(getattr(model, "converged_", True)),
+                            "mean_self_transition_probability": (
+                                float(np.diag(model.transition_).mean())
+                                if algorithm == "hmm"
+                                else float("nan")
+                            ),
                             "posterior_probabilities_available": algorithm != "kmeans",
                             "fraction_bouts_at_duration_cap": cap_fraction,
                             "checkpoint": str(checkpoint),
@@ -467,6 +502,7 @@ def run_downstream_benchmark(
                         "median_bout_duration_s",
                         "fraction_one_timestep_bouts",
                         "fraction_bouts_at_duration_cap",
+                        "mean_self_transition_probability",
                     )
                     if column in subset and not subset.empty
                 },
@@ -474,7 +510,7 @@ def run_downstream_benchmark(
         )
     pd.DataFrame(summaries).to_csv(output / "summary.csv", index=False)
     manifest = {
-        "contract": "social_downstream_benchmark_v1",
+        "contract": "social_downstream_benchmark_v2",
         "encoder": encoder_name,
         "encoder_seed": encoder_seed,
         "embedding_dir": str(Path(embedding_dir).resolve()),
@@ -488,6 +524,9 @@ def run_downstream_benchmark(
         "state_counts": state_counts,
         "downstream_seeds": seeds,
         "max_durations_patches": max_durations,
+        "hmm_timestep_s": hmm_timestep_s,
+        "hmm_sticky_expected_duration_s": hmm_sticky_expected_duration_s,
+        "hmm_sticky_prior_strength": hmm_sticky_prior_strength,
         "pca_dim": preprocessor.output_dim,
         "thread_limit": thread_limit,
         "pca_explained_variance_ratio": (
@@ -498,6 +537,7 @@ def run_downstream_benchmark(
         "notes": [
             "Scaling and PCA were fitted on training trials only.",
             "Every trial and invalid-gap-delimited run remains a separate sequence.",
+            "The HMM uses a physical-time-derived sticky Dirichlet transition prior; decoded short bouts are not deleted after fitting.",
             "A4_C4 is reused development/validation data, not an untouched test.",
             "A5_C5 is excluded from fitting, selection, and performance claims.",
             "Raw likelihoods are comparable across algorithms only within one fixed encoder/PCA observation space.",
@@ -522,9 +562,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--algorithm", action="append", choices=sorted(ALGORITHMS), required=True)
     parser.add_argument("--states", nargs="+", type=int, default=[4, 6, 8, 10, 12])
     parser.add_argument("--seed", nargs="+", type=int, default=[0, 1, 2])
-    parser.add_argument("--max-duration", nargs="+", type=int, default=[25, 50, 100])
+    parser.add_argument(
+        "--max-duration", nargs="+", type=int, default=[100, 200, 400]
+    )
     parser.add_argument("--pca-dim", type=int, default=16)
     parser.add_argument("--hmm-max-iter", type=int, default=40)
+    parser.add_argument("--hmm-timestep-s", type=float, default=0.04)
+    parser.add_argument("--hmm-sticky-expected-duration-s", type=float, default=2.0)
+    parser.add_argument("--hmm-sticky-prior-strength", type=float, default=50000.0)
     parser.add_argument("--hsmm-max-iter", type=int, default=20)
     parser.add_argument("--gmm-max-iter", type=int, default=100)
     parser.add_argument("--covariance-floor", type=float, default=1e-3)
@@ -550,6 +595,9 @@ def main() -> int:
         pca_dim=args.pca_dim,
         covariance_floor=args.covariance_floor,
         hmm_max_iter=args.hmm_max_iter,
+        hmm_timestep_s=args.hmm_timestep_s,
+        hmm_sticky_expected_duration_s=args.hmm_sticky_expected_duration_s,
+        hmm_sticky_prior_strength=args.hmm_sticky_prior_strength,
         hsmm_max_iter=args.hsmm_max_iter,
         gmm_max_iter=args.gmm_max_iter,
         tolerance=args.tolerance,

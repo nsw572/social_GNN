@@ -1,0 +1,31 @@
+analysis: formal_hmm_k_selection_0p04_v1
+architectures:
+  - graph_full
+  - invariant_mlp_full
+encoder_seeds: [20261013, 20261029, 20261107]
+hmm_seeds: [0, 1, 2]
+k_grid: [4, 5, 6, 7, 8, 10, 12]
+split:
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  development_trial: A4_C4
+  excluded_trial: A5_C5
+observation_space:
+  timestep_s: 0.04
+  frozen_pca_dim: 16
+hmm:
+  covariance: diagonal
+  max_iter: 40
+  tolerance: 0.0001
+  covariance_floor: 0.001
+  target_dwell_s: 2.0
+  target_self_transition: 0.98
+  fixed_prior_strength: 50000.0
+  warm_start: false
+secondary_prior_policy:
+  formula: 50000 * 6 / K
+  shortlist_rule:
+    - mandatory K=6 reference
+    - modal seedwise AIC winner, ties to lower K
+    - modal seedwise BIC winner, ties to lower K
+    - highest mean within-encoder ARI, ties to lower K
+    - highest mean matched-seed cross-encoder ARI, ties to lower K

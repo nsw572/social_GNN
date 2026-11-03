@@ -1,0 +1,65 @@
+version: social_gnn_downstream_benchmark_0p04_v2
+output_root: evaluation_runs/gnn_9dim_0p04_downstream_v2
+experiment_config: configs/social_gnn_pointwise_9dim_v2.yaml
+
+data_protocol:
+  timestep_s: 0.04
+  patch_duration_s: 0.04
+  patch_stride_s: 0.04
+  node_mode: one_aligned_upstream_latent_per_timestep
+  edge_mode: one_confidence_aware_trait_matrix_per_same_timestep
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  validation_trials: [A4_C4]
+  excluded_trials: [A5_C5]
+  validation_warning: A4_C4 was used for earlier encoder selection and is not an untouched test trial.
+
+preprocessing:
+  standardize_on_training_trials_only: true
+  pca_dim: 16
+  pca_fit_on_training_trials_only: true
+
+search:
+  state_counts: [4, 6, 8, 10, 12]
+  hsmm_max_duration_timesteps: [100, 200, 400]
+  hsmm_max_duration_seconds: [4.0, 8.0, 16.0]
+  screening_downstream_seeds: [0]
+  confirmation_downstream_seeds: [0, 1, 2]
+  covariance_floor: 0.001
+  tolerance: 0.0001
+  gmm_max_iter: 100
+  hmm_max_iter: 40
+  hsmm_screening_max_iter: 8
+  hsmm_confirmation_max_iter: 20
+
+hmm_sticky_prior:
+  timestep_s: 0.04
+  expected_duration_s: 2.0
+  target_self_transition_probability: 0.98
+  prior_strength: 50000.0
+  calibration_note: The 90-configuration sensitivity sweep identified 25000-100000 as a broad partition-stability region; 50000/2 s produced a learned mean self-transition of 0.9674 and remains the development default.
+  interpretation: Dirichlet transition prior used during EM; not post-hoc deletion of short bouts.
+
+representations:
+  graph_full:
+    architecture: GINE Social-GNN
+    objective: full reconstruction
+    embeddings: evaluation_runs/gnn_9dim_0p04_v2/embeddings/graph_full/seed_{seed}
+  graph_hybrid_p2:
+    architecture: GINE Social-GNN
+    objective: full plus masked reconstruction, preservation weight 2
+    embeddings: evaluation_runs/gnn_9dim_0p04_v2/embeddings/graph_hybrid_p2/seed_{seed}
+  invariant_mlp_full:
+    architecture: exact two-animal symmetrized MLP
+    objective: full reconstruction
+    embeddings: evaluation_runs/gnn_9dim_0p04_v2/embeddings/invariant_mlp_full/seed_{seed}
+  invariant_mlp_hybrid_p2:
+    architecture: exact two-animal symmetrized MLP
+    objective: full plus masked reconstruction, preservation weight 2
+    embeddings: evaluation_runs/gnn_9dim_0p04_v2/embeddings/invariant_mlp_hybrid_p2/seed_{seed}
+
+scientific_constraints:
+  - Never bridge trial boundaries or invalid clock gaps.
+  - Node and edge tensors must have identical 0.04 s physical intervals.
+  - Rebuild node, edge, encoder, and downstream artifacts; do not relabel 0.16 s outputs as 0.04 s.
+  - Treat the sticky setting as a tunable prior and report learned diagonal transition probabilities.
+  - State numbers receive no automatic behavioral names.

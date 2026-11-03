@@ -1,0 +1,40 @@
+version: social_gnn_state_atlas_visualizations_v1
+project_root: ..
+atlas_root: evaluation_runs/state_atlas_v1
+output_root: evaluation_runs/state_atlas_v1/visualizations
+
+trial_ids: [A1_C1, A3_C3, A4_B4, A4_C4]
+excluded_trial: A5_C5
+
+timeline_explorer:
+  default_window_s: 120
+  default_channels:
+    - hmm_state
+    - state_confidence
+    - centroid_distance
+    - pair_closing_speed
+    - movement_direction_alignment
+    - dynamic_quality
+    - pose_quality
+  scale_modes: [raw, per_channel_normalized, robust_median_iqr]
+  percentile_clipping: optional_display_only
+
+state_fingerprint:
+  center: median
+  heatmap_scale: cross_state_median_iqr_per_channel
+  violin_sample_per_state: 2500
+  random_seed: 20261102
+  summary_statistics: [median, iqr, p10, p90, trimmed_mean_10pct]
+
+pose_validity_matrix:
+  aggregate_scope: all_four_trials
+  include_trial_stratified_rows: true
+  delta_reference: channel_specific_global_validity_fraction
+
+constraints:
+  - Do not retrain or refit any frozen component.
+  - Do not include A5_C5.
+  - Preserve missingness and directionality.
+  - Do not multiply trait values by confidence.
+  - Do not require source videos.
+  - Do not assign biological behavior labels.

@@ -16,6 +16,11 @@ from typing import Any
 
 import numpy as np
 
+from .holdout import (
+    HOLDOUT_RELEASE_TOKEN,
+    LOCKED_9D_CONFIRMATORY_TRIALS,
+    assert_9d_holdout_access,
+)
 from .evaluation import (
     TRAIT_NAMES,
     apply_native_edge_mode,
@@ -114,9 +119,24 @@ def evaluate_edge_sensitivity(
     include_random: bool = True,
     candidate_count: int = 96,
     exclude_trials: tuple[str, ...] = (),
+    holdout_release_token: str | None = None,
 ) -> dict[str, Any]:
     config, raw_packages = load_trials(experiment_config)
     excluded = set(exclude_trials)
+    node_dim = raw_packages[0].node_features.shape[-1]
+    if node_dim == 9 and holdout_release_token != HOLDOUT_RELEASE_TOKEN:
+        excluded |= set(LOCKED_9D_CONFIRMATORY_TRIALS)
+    else:
+        assert_9d_holdout_access(
+            [
+                package.trial_id
+                for package in raw_packages
+                if package.trial_id not in excluded
+            ],
+            node_dim=node_dim,
+            release_token=holdout_release_token,
+            context="edge-sensitivity evaluation",
+        )
     unknown = excluded - {package.trial_id for package in raw_packages}
     if unknown:
         raise ValueError(f"unknown excluded trial IDs: {sorted(unknown)}")
@@ -127,7 +147,6 @@ def evaluate_edge_sensitivity(
         raise ValueError("edge sensitivity evaluation has no trials after exclusions")
     device = resolve_evaluation_device(device_name)
     model_config = config.get("model", {})
-    node_dim = raw_packages[0].node_features.shape[-1]
     number_of_nodes = raw_packages[0].node_features.shape[1]
     checkpoints = discover_encoder_checkpoints(experiment_dir)
     encoders = [
@@ -335,6 +354,7 @@ def evaluate_edge_sensitivity(
         ],
         "trials": [package.trial_id for package in raw_packages],
         "excluded_trials": sorted(excluded),
+        "holdout_release_used": holdout_release_token == HOLDOUT_RELEASE_TOKEN,
         "notes": [
             "All perturbations keep node inputs fixed except the explicit node_shuffled control.",
             "Shuffled and matched replacements move values and confidence together for both directed edges.",
@@ -362,6 +382,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-count", type=int, default=96)
     parser.add_argument("--no-random-control", action="store_true")
     parser.add_argument("--exclude-trial", action="append", default=[])
+    parser.add_argument(
+        "--holdout-release-token",
+        help="Explicit protocol release required to include a locked 9D holdout.",
+    )
     return parser.parse_args()
 
 
@@ -380,6 +404,7 @@ def main() -> int:
         include_random=not args.no_random_control,
         candidate_count=args.candidate_count,
         exclude_trials=tuple(args.exclude_trial),
+        holdout_release_token=args.holdout_release_token,
     )
     print(manifest["output_dir"])
     return 0

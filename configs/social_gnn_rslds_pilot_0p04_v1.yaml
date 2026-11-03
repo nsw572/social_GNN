@@ -1,0 +1,41 @@
+analysis: rslds_pilot_0p04_v1
+backend: lindermanlab_ssm
+backend_model:
+  transitions: recurrent
+  dynamics: diagonal_gaussian
+  emissions: gaussian_orthog
+  single_subspace: true
+  inference: laplace_em
+  variational_posterior: structured_meanfield
+observation_space:
+  architecture: graph_full
+  encoder_seed_rule: smallest_declared_seed_before_rslds_results
+  encoder_seed: 20261013
+  frozen_embedding_dim: 64
+  frozen_pca_dim: 16
+  timestep_s: 0.04
+split:
+  train_trials: [A1_C1, A3_C3, A4_B4]
+  development_trial: A4_C4
+  excluded_trial: A5_C5
+feasibility:
+  trial: A1_C1
+  selection: first_contiguous_valid_run_then_first_2500_points
+  points: 2500
+  duration_s: 100.0
+pilot:
+  principal:
+    - {K: 4, M: 4}
+    - {K: 6, M: 4}
+    - {K: 8, M: 4}
+  sensitivity:
+    - {K: 6, M: 8}
+    - {K: 8, M: 8}
+  principal_seeds: [0, 1, 2]
+  sensitivity_seeds: [0, 1]
+  num_iters: 50
+forecast:
+  horizons: [1, 5, 25]
+  meaning_seconds: [0.04, 0.20, 1.00]
+  protocol: prefix_conditioned_plugin_mean
+  origins: 25

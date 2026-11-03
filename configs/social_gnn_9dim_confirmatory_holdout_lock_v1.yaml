@@ -1,0 +1,30 @@
+contract: social_gnn_9dim_confirmatory_holdout_lock_v1
+status: locked
+trial_id: A5_C5
+representation_scope: upstream_9dim_latent
+release_token: RELEASE_A5_C5_9D_CONFIRMATORY_HOLDOUT
+
+selection_protocol:
+  training_trials: [A1_C1, A3_C3, A4_B4]
+  development_trial: A4_C4
+  confirmatory_holdout_trial: A5_C5
+
+allowed_while_locked:
+  - retain existing node, edge, embedding, and historical exploratory artifacts
+  - verify file integrity and hashes without reading performance metrics
+  - train and select models using only the training trials and A4_C4
+
+blocked_while_locked:
+  - use A5_C5 for normalization, PCA, fitting, checkpoint selection, or hyperparameter selection
+  - generate new 9D probes or frozen embeddings for A5_C5 by default
+  - generate HMM, HSMM, rSLDS, montage, or interpretation outputs for A5_C5
+  - compare candidate architectures, K, M, seeds, or sticky settings on A5_C5
+
+release_prerequisites:
+  - freeze one final encoder checkpoint and record its SHA-256
+  - freeze normalization and PCA artifacts and record their SHA-256 values
+  - freeze the downstream model family, K, M, seed policy, and sticky policy
+  - freeze metrics and pass/fail criteria before inspecting A5_C5 results
+  - execute A5_C5 once as a confirmatory 9D holdout
+
+reporting_label: prospectively locked 9D confirmatory holdout; pre-lock exploratory artifacts may exist but are excluded from all further selection

@@ -12,6 +12,10 @@ import numpy as np
 import torch
 from sklearn.linear_model import Ridge
 
+from .holdout import (
+    HOLDOUT_RELEASE_TOKEN,
+    assert_9d_confirmatory_split,
+)
 from .evaluation import (
     TRAIT_NAMES,
     apply_native_edge_mode,
@@ -311,11 +315,13 @@ def evaluate_information_retention(
     run_mlp: bool = True,
     mlp_epochs: int = 30,
     native_only: bool = False,
+    holdout_release_token: str | None = None,
 ) -> dict[str, Any]:
     config, raw_packages = load_trials(experiment_config)
     package_by_id = {package.trial_id: package for package in raw_packages}
     validation_ids = list(validation_trials)
     test_ids = list(test_trials)
+    node_dim = raw_packages[0].node_features.shape[-1]
     excluded_ids = {str(value) for value in exclude_trials}
     overlap = set(validation_ids) & set(test_ids)
     if overlap:
@@ -334,12 +340,19 @@ def evaluate_information_retention(
         for package in raw_packages
         if package.trial_id not in set(validation_ids) | set(test_ids) | excluded_ids
     ]
+    assert_9d_confirmatory_split(
+        training_trial_ids=train_ids,
+        validation_trial_ids=validation_ids,
+        test_trial_ids=test_ids,
+        node_dim=node_dim,
+        release_token=holdout_release_token,
+        context="information-retention probe",
+    )
     if not train_ids or not validation_ids or not test_ids:
         raise ValueError("probe protocol requires non-empty disjoint train/validation/test trial sets")
 
     device = resolve_evaluation_device(device_name)
     model_config = config.get("model", {})
-    node_dim = raw_packages[0].node_features.shape[-1]
     number_of_nodes = raw_packages[0].node_features.shape[1]
     checkpoints = discover_encoder_checkpoints(experiment_dir)
     encoders = []
@@ -614,6 +627,7 @@ def evaluate_information_retention(
         },
         "legacy_encoder_validation_trials": sorted(legacy_validation),
         "legacy_encoder_test_leakage_warning": bool(legacy_validation & set(test_ids)),
+        "holdout_release_used": holdout_release_token == HOLDOUT_RELEASE_TOKEN,
         "models": [
             {
                 "name": encoder.name,
@@ -661,6 +675,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-random-control", action="store_true")
     parser.add_argument("--random-control-count", type=int, default=1)
     parser.add_argument("--native-only", action="store_true")
+    parser.add_argument(
+        "--holdout-release-token",
+        help="Explicit protocol release required to probe a locked 9D holdout.",
+    )
     return parser.parse_args()
 
 
@@ -684,6 +702,7 @@ def main() -> int:
         run_mlp=not args.skip_mlp,
         mlp_epochs=args.mlp_epochs,
         native_only=args.native_only,
+        holdout_release_token=args.holdout_release_token,
     )
     print(manifest["output_dir"])
     return 0

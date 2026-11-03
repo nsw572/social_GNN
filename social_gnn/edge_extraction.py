@@ -19,9 +19,19 @@ import numpy as np
 import pandas as pd
 
 try:  # Support both ``python -m social_gnn...`` and direct script execution.
-    from .authoritative_clock import load_node_clock, validate_fixed_patch_grid
+    from .authoritative_clock import (
+        CANONICAL_SOCIAL_TIMESTEP_S,
+        load_node_clock,
+        validate_fixed_patch_grid,
+        validate_social_timestep,
+    )
 except ImportError:  # pragma: no cover - exercised by Windows pipeline execution
-    from authoritative_clock import load_node_clock, validate_fixed_patch_grid
+    from authoritative_clock import (
+        CANONICAL_SOCIAL_TIMESTEP_S,
+        load_node_clock,
+        validate_fixed_patch_grid,
+        validate_social_timestep,
+    )
 
 
 TRAIT_NAMES = (
@@ -998,10 +1008,16 @@ def run_edge_extraction(
     clock_node_npz: Path,
     minimum_patch_displacement_px: float = 1.0,
     save_frame_level: bool = True,
+    expected_timestep_s: float = CANONICAL_SOCIAL_TIMESTEP_S,
 ) -> dict[str, Any]:
     inputs = load_frame_inputs(idtracker_csv, matched_mousegpt_csv)
     social_step, patch_start_s, patch_end_s, clock_meta = load_node_clock(
         clock_node_npz
+    )
+    validate_social_timestep(
+        clock_meta,
+        expected_timestep_s=expected_timestep_s,
+        label="edge extraction node clock",
     )
     result = extract_social_edges_on_clock(
         inputs,
@@ -1049,6 +1065,15 @@ def parse_args() -> argparse.Namespace:
             "Motion-noise floor used to downweight patch displacement direction."
         ),
     )
+    parser.add_argument(
+        "--expected-timestep-s",
+        type=float,
+        default=CANONICAL_SOCIAL_TIMESTEP_S,
+        help=(
+            "Required node-clock duration and stride. The canonical pointwise "
+            "pipeline uses 0.04 seconds."
+        ),
+    )
     parser.add_argument("--no-frame-level", action="store_true")
     return parser.parse_args()
 
@@ -1063,6 +1088,7 @@ def main() -> int:
         clock_node_npz=args.clock_node_npz,
         minimum_patch_displacement_px=args.minimum_patch_displacement_px,
         save_frame_level=not args.no_frame_level,
+        expected_timestep_s=args.expected_timestep_s,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

@@ -256,17 +256,20 @@ def boundary_agreement(
 
     left_positions = np.flatnonzero(left_boundary)
     right_positions = np.flatnonzero(right_boundary)
-    used: set[int] = set()
+    available = {int(value) for value in right_positions}
     tolerant_matches = 0
     for position in left_positions:
         candidates = [
-            int(value)
-            for value in right_positions
-            if int(value) not in used and abs(int(value) - int(position)) <= tolerance_patches
+            value
+            for value in range(
+                int(position) - tolerance_patches,
+                int(position) + tolerance_patches + 1,
+            )
+            if value in available
         ]
         if candidates:
             selected = min(candidates, key=lambda value: (abs(value - int(position)), value))
-            used.add(selected)
+            available.remove(selected)
             tolerant_matches += 1
     tolerant_precision = tolerant_matches / right_n if right_n else float(left_n == 0)
     tolerant_recall = tolerant_matches / left_n if left_n else float(right_n == 0)

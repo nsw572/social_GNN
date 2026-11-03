@@ -15,6 +15,8 @@ Commands:
   ari-stability  Decompose saved confirmation ARIs by encoder/downstream seeds.
   consistency-audit  Audit video timing and HMM state correspondence.
   montage    Export longest-bout source-video montages for one saved HMM run.
+  state-atlas  Build the read-only K=12 quantitative/QC/video State Atlas.
+  state-atlas-viz  Generate the three frozen State Atlas visualization modules.
   export     Decode trials and export states, bouts, summaries, and figures.
   synthetic  Run synthetic recovery and numerical checks.
 
@@ -44,6 +46,10 @@ def main() -> int:
         from .temporal_state_consistency import main as run
     elif command == "montage":
         from .video_montage import main as run
+    elif command == "state-atlas":
+        from .state_atlas import main as run
+    elif command == "state-atlas-viz":
+        from .state_atlas_visualizations import main as run
     elif command == "export":
         from .state_export import main as run
     elif command == "synthetic":

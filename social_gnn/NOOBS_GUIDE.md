@@ -7,7 +7,7 @@ Python/YAML。
 如果只记住一句话，请记住：
 
 > 我们把每只鼠看成一个 node，把两只鼠之间的距离、朝向和相对运动看成
-> directed edge；GNN 每 0.16 秒生成一个社会行为向量 `g_t`，之后再由
+> directed edge；GNN 每 0.04 秒生成一个社会行为向量 `g_t`，之后再由
 > HMM/HSMM 在时间上发现行为状态。
 
 ## 1. 这个项目到底在做什么？
@@ -71,20 +71,23 @@ trial_id          scalar/string
 `T` 是这场 trial 的 social patch 数。node 维度目前是 9，但读取和模型构建尽量
 动态推断 `D_node`，避免上游再次改变 latent 维度时大面积改代码。
 
-## 3. 0.16 秒是什么意思？
+## 3. 0.04 秒是什么意思？
 
-当前 social clock 的 stride 是 0.16 秒。每个 `g_t` 对应权威 node clock 中的
-一个 patch。
+当前 social clock 的 duration 和 stride 都是 0.04 秒。每个 `g_t` 对应权威
+node clock 中的一个非重叠时间点/小区间。
 
 上游 IMU latent 可能使用大约一秒的感受野。这不代表 Social-GNN patch 也应改成
 一秒。正确理解是：
 
-- 输出仍然每 0.16 秒一个 patch；
+- 上游每个 25 Hz latent 直接对应一个 0.04 秒 node，不再四点平均成 0.16 秒；
 - 相邻 node latent 因上游感受野重叠而不完全独立；
 - node 和 edge 必须描述完全相同的物理时间区间；
-- 实际 `dt` 从时间戳计算，代码不把 0.16 硬编码进速度公式。
+- edge state traits 在相同 `[start,end)` 中从视频帧计算，dynamic traits 仍由相邻
+  时间点差分；
+- 实际 `dt` 从时间戳计算，速度公式不依赖写死的常数。
 
-不要为了“看起来独立”擅自抽掉 3/4 patch，也不要自己重建另一套视频 clock。
+旧 0.16 秒 node/edge/checkpoint 不能改标签后继续使用；必须从 latent 和视频重新
+生成 0.04 秒数据，再重新训练 encoder 与 HMM。
 
 ## 4. 八个 edge traits 是什么？
 
@@ -394,7 +397,7 @@ python -m social_gnn.evaluate_information_retention `
 
 ```powershell
 python -m social_gnn.downstream extract `
-  --experiment-config configs\social_gnn_full_benchmark_9dim_v1.yaml `
+  --experiment-config configs\social_gnn_pointwise_9dim_v2.yaml `
   --checkpoint <experiment目录>\graph_full\best.pt `
   --output-dir evaluation_runs\downstream_9dim\graph_full\embeddings `
   --device cuda:1
@@ -412,29 +415,49 @@ python -m social_gnn.downstream search `
   --states 4 6 8 10 12 `
   --seed 0 1 2 3 4 `
   --pca-dim 16 `
-  --max-duration 100
+  --max-duration 200 `
+  --hmm-timestep-s 0.04 `
+  --hmm-sticky-expected-duration-s 2.0 `
+  --hmm-sticky-prior-strength 50000.0
 ```
+
+默认 sticky HMM 把 2 秒期望停留时间换算成
+`p_self = 1 - 0.04 / 2.0 = 0.98`。完整的 90 配置 sensitivity sweep 表明：
+strength 从 10 增加到 100000 时，实际平均自转移从 0.903 增至 0.973，
+bouts/min 从 130 降至 79，因此先验会实质改变时间分段。25000–100000 是较宽的
+partition-stability 区域，正式默认仍为 50000/2 s，实际平均自转移约 0.967。
+在这个设置下，prior/data transition row-mass ratio 平均为 2.216，不能把它描述成
+微弱先验。这是 EM 中的转移先验，不是解码后强行删除短 bout。训练数据量明显变化时
+应重新校准，并始终报告实际平均对角转移概率。
 
 HMM/HSMM state 编号没有天然语义。`state 3` 不自动等于“打架”。必须结合原始 node、
 edge、bout 视频和外部标注解释。无效 patch 会切断序列，模型不会跨 trial 或缺口学习
 转移。
 
-注意：`configs/social_gnn_downstream_9dim_v1.yaml` 当前记录的是较早的 hybrid checkpoint。
-若改用新 benchmark 的 `graph_full`，必须同步更新 experiment config、checkpoint 和 hash，
-不能只改显示名称。
+注意：`configs/social_gnn_downstream_9dim_v1.yaml` 记录的是旧 0.16 秒 hybrid
+checkpoint。新链路使用 `configs/social_gnn_downstream_benchmark_9dim_0p04_v2.yaml`；
+必须同步更新 experiment config、checkpoint 和 hash，不能只改显示名称。
 
 ## 16. 当前结果应该怎样理解？
 
-截至 2026-10-19：
+截至 2026-10-23，0.04 秒 pointwise node/edge、encoder 和 downstream 已经全部
+重建并完成三 seed 正式测试：
 
-- `graph_full` 是四项信息保留指标最均衡的模型；
-- `graph_hybrid_p2` 是 masked robustness 候选；
+- `invariant_mlp_full` 是当前四项 frozen information-retention 指标冠军，均值
+  0.7857；`graph_full` 是最强 message-passing 模型，均值 0.7648；
+- `invariant_mlp_hybrid_p2 + sticky HMM` 的 overall ARI 为 0.546，fixed-encoder
+  ARI 为 0.835；`graph_full + sticky HMM` 分别为 0.456 和 0.741；
+- 当前 HMM 比所测 HSMM 更少碎片，并有更好的同 representation/PCA 空间
+  development likelihood；
+- 50000/2 s 位于较稳定的 sticky-prior 区域，但增强先验没有解决 cross-encoder
+  instability，cross-encoder ARI 仍只有约 0.33–0.36；
 - 64D `g_t` 明显优于当前测试的 32D；
 - node-only 和 shuffled-edge control 的 edge R2 接近或低于零，说明真实对齐 edge 被
   模型实际使用；
 - role-aware readout 有很高的 directed/role retention，但它依赖 identity 顺序，不是
   permutation-invariant canonical representation；
-- MLP control 的 edge retention 很高，但没有 GNN message passing，也存在置换误差。
+- 当前 invariant MLP 对两只动物是精确置换不变的，但没有 GNN message passing，
+  也不能据此证明它发现了更正确的生物学状态。
 
 这些结论来自目前五场数据，其中 `A4_C4` 已被用于 encoder checkpoint 选择，所以不是
 完全独立的最终测试集。不要把当前排名写成已经证明某个模型能发现最佳生物学行为状态。
@@ -447,7 +470,8 @@ edge、bout 视频和外部标注解释。无效 patch 会切断序列，模型�
 
 ### 错误 2：看到上游约一秒感受野，就把 patch 改成一秒
 
-不对。当前 social stride 仍为 0.16 秒；相邻特征相关是允许的。
+不对。当前 social stride 是 0.04 秒；相邻特征相关是允许的，上游感受野不等于
+Social-GNN 的输出间隔。
 
 ### 错误 3：node 和 edge 长度不同就裁到较短者
 

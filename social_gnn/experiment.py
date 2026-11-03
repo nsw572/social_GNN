@@ -27,6 +27,10 @@ from .data import (
     build_social_dataloader,
 )
 from .graph_builder import compose_edge_inputs
+from .holdout import (
+    HOLDOUT_RELEASE_TOKEN,
+    assert_9d_confirmatory_split,
+)
 from .graph_level_ssl import (
     GraphLevelSocialSSL,
     graph_level_reconstruction_loss,
@@ -741,6 +745,37 @@ def load_experiment_config(path: str | Path) -> dict[str, Any]:
     return config
 
 
+def _validate_package_clocks(
+    config: Mapping[str, Any], packages: Sequence[SocialTrialPackage]
+) -> None:
+    """Enforce an optional experiment-level physical clock contract."""
+    clock = config.get("clock")
+    if clock is None:
+        return
+    if not isinstance(clock, Mapping):
+        raise ValueError("clock configuration must be a mapping")
+    duration = float(clock.get("patch_duration_s", float("nan")))
+    stride = float(clock.get("patch_stride_s", float("nan")))
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("clock.patch_duration_s must be positive and finite")
+    if not math.isfinite(stride) or stride <= 0:
+        raise ValueError("clock.patch_stride_s must be positive and finite")
+    for package in packages:
+        observed_duration = package.patch_end_s - package.patch_start_s
+        if not np.allclose(observed_duration, duration, rtol=1e-7, atol=1e-9):
+            raise ValueError(
+                f"Trial {package.trial_id!r}: clock duration does not match "
+                f"configured {duration} s"
+            )
+        if package.timesteps > 1 and not np.allclose(
+            np.diff(package.patch_start_s), stride, rtol=1e-7, atol=1e-9
+        ):
+            raise ValueError(
+                f"Trial {package.trial_id!r}: clock stride does not match "
+                f"configured {stride} s"
+            )
+
+
 def run_experiment(
     config: Mapping[str, Any],
     *,
@@ -759,6 +794,7 @@ def run_experiment(
     device = _resolve_device(device_override or str(config.get("device", "auto")))
     specs = _trial_specs(config)
     packages, missing = _load_packages(specs, allow_missing=smoke_test)
+    _validate_package_clocks(config, packages)
     output_root = Path(config["output_dir"]).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     session_dir = _timestamped_directory(
@@ -795,6 +831,16 @@ def run_experiment(
             if package.trial_id not in test_ids | excluded_ids
         ]
         training, validation = _split_packages(selectable, validation_ids)
+    node_dim = packages[0].node_features.shape[-1]
+    release_token = config.get("split", {}).get("holdout_release_token")
+    assert_9d_confirmatory_split(
+        training_trial_ids=(package.trial_id for package in training),
+        validation_trial_ids=(package.trial_id for package in validation),
+        test_trial_ids=(package.trial_id for package in test),
+        node_dim=node_dim,
+        release_token=release_token,
+        context="Social-GNN experiment split",
+    )
     normalizer = fit_feature_standardizer(
         training, epsilon=float(config.get("normalization", {}).get("epsilon", 1e-6))
     )
@@ -835,6 +881,7 @@ def run_experiment(
                 for value in config.get("split", {}).get("excluded_trials", [])
             )
         ),
+        "holdout_release_used": release_token == HOLDOUT_RELEASE_TOKEN,
         "runs": [],
     }
     _write_json(session_dir / "manifest.json", manifest)

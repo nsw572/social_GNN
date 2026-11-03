@@ -1241,6 +1241,8 @@ def build_edge_extraction_command(
         job.video_id,
         "--minimum-patch-displacement-px",
         str(edge_cfg.get("minimum_patch_displacement_px", 1.0)),
+        "--expected-timestep-s",
+        str(edge_cfg.get("expected_timestep_s", 0.04)),
     ]
     clock_node_npz = _edge_clock_for_job(config, job)
     if clock_node_npz is None:

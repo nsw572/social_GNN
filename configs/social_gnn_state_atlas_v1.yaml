@@ -1,0 +1,50 @@
+version: social_gnn_state_atlas_v1
+project_root: ..
+output_dir: evaluation_runs/state_atlas_v1
+
+trial_ids: [A1_C1, A3_C3, A4_B4, A4_C4]
+excluded_trial: A5_C5
+
+frozen_pipeline:
+  architecture: graph_full
+  encoder_seed: 20261107
+  graph_embedding_dim: 64
+  observation_dim: 16
+  state_count: 12
+  timestep_s: 0.04
+  embedding_dir: evaluation_runs/gnn_9dim_0p04_v2/embeddings/graph_full/seed_20261107
+  edge_dir: evaluation_runs/gnn_9dim_0p04_v2/edges
+  preprocessor: evaluation_runs/gnn_9dim_0p04_downstream_v2/sticky_hmm_strength50000/graph_full/seed_20261107/preprocessing/pca_16.npz
+  hmm_checkpoint: evaluation_runs/gnn_9dim_0p04_downstream_v2/k_selection_v1/runs/fixed/graph_full/encoder_seed_20261107/k_12/hmm_seed_0/model.npz
+  representative_assignment: evaluation_runs/gnn_9dim_0p04_downstream_v2/k_selection_v1/runs/fixed/graph_full/encoder_seed_20261107/k_12/hmm_seed_0/A4_C4_states.npz
+
+video_mapping:
+  trial_alignment_summary: evaluation_runs/gnn_9dim_downstream_v1/comparisons/temporal_and_state_consistency/temporal_alignment/trial_alignment_summary.csv
+  video_metadata: evaluation_runs/gnn_9dim_downstream_v1/comparisons/temporal_and_state_consistency/temporal_alignment/video_metadata.csv
+  time_offsets: configs/social_gnn_temporal_alignment_v1.yaml
+  mapping_rule: video_pts = social_patch_time + video_time_offset_s
+
+analysis:
+  boundary_window_s: 0.20
+  short_bout_s: 0.40
+  missing_trait_rule: NaN in atlas analysis tensor plus explicit validity metadata
+
+clips:
+  clips_per_category: 3
+  context_s: 1.5
+  max_focal_s: 2.0
+  boundary_focal_s: 0.4
+  max_overlap_fraction: 0.25
+  random_seed: 20261101
+  render: false
+  overwrite: false
+  ffmpeg: 'D:\ffmpeg-7.1-essentials_build\bin\ffmpeg.exe'
+
+scientific_constraints:
+  - Read only; do not fit encoder, scaler, PCA, or HMM.
+  - Do not change K or state assignments.
+  - Do not include A5_C5.
+  - Preserve A->B and B->A directed edges separately.
+  - Do not multiply raw trait values by confidence.
+  - Do not interpret large dynamic magnitude as bad measurement.
+  - Do not assign biological behavior names.

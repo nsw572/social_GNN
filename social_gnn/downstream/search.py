@@ -11,7 +11,11 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from .embeddings import FrozenEmbeddingTrial, load_embedding_directory
+from .embeddings import (
+    FrozenEmbeddingTrial,
+    load_embedding_directory,
+    validate_embedding_timestep,
+)
 from .evaluation import decode_trial, segmentation_metrics, stability_metrics
 from .gaussian_hmm import GaussianHMM
 from .gaussian_hsmm import GaussianHSMM
@@ -48,14 +52,18 @@ def run_temporal_search(
     seeds: list[int],
     pca_dims: list[int],
     hmm_max_iter: int = 40,
+    hmm_timestep_s: float = 0.04,
+    hmm_sticky_expected_duration_s: float | None = 2.0,
+    hmm_sticky_prior_strength: float = 50000.0,
     hsmm_max_iter: int = 20,
     covariance_floor: float = 1e-3,
-    max_duration: int = 50,
+    max_duration: int = 200,
     tolerance: float = 1e-4,
 ) -> dict[str, Any]:
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     trials = load_embedding_directory(embedding_dir)
+    validate_embedding_timestep(trials, hmm_timestep_s)
     by_id = _trials_by_id(trials)
     requested = set(train_trial_ids) | set(validation_trial_ids)
     missing = sorted(requested - set(by_id))
@@ -94,6 +102,9 @@ def run_temporal_search(
                         model = GaussianHMM(
                             n_states=states,
                             covariance_floor=covariance_floor,
+                            timestep_s=hmm_timestep_s,
+                            sticky_expected_duration_s=hmm_sticky_expected_duration_s,
+                            sticky_prior_strength=hmm_sticky_prior_strength,
                             seed=seed,
                         ).fit(
                             train_sequences,
@@ -132,6 +143,17 @@ def run_temporal_search(
                         "validation_trials": validation_trial_ids,
                         "pca_dim": preprocessor.output_dim,
                         "seed": seed,
+                        "hmm_timestep_s": (
+                            hmm_timestep_s if model_type == "hmm" else None
+                        ),
+                        "hmm_sticky_expected_duration_s": (
+                            hmm_sticky_expected_duration_s
+                            if model_type == "hmm"
+                            else None
+                        ),
+                        "hmm_sticky_prior_strength": (
+                            hmm_sticky_prior_strength if model_type == "hmm" else None
+                        ),
                     }
                     model.save(checkpoint_path, metadata=metadata)
                     elapsed = time.perf_counter() - started
@@ -149,6 +171,11 @@ def run_temporal_search(
                         "bic_train": np.log(train_steps) * parameter_count - 2 * train_ll,
                         "iterations": len(model.history_),
                         "converged": bool(model.converged_),
+                        "mean_self_transition_probability": (
+                            float(np.diag(model.transition_).mean())
+                            if model_type == "hmm"
+                            else float("nan")
+                        ),
                         "elapsed_s": elapsed,
                         "checkpoint": str(checkpoint_path),
                         "preprocessor": str(preprocess_path),
@@ -190,6 +217,9 @@ def run_temporal_search(
                     group["states_over_one_percent"].mean()
                 ),
                 "mean_state_confidence": float(group["mean_state_confidence"].mean()),
+                "mean_self_transition_probability": float(
+                    group["mean_self_transition_probability"].mean()
+                ),
                 "converged_fraction": float(group["converged"].mean()),
                 "best_seed": int(best["seed"]),
                 "best_validation_ll_per_timestep": float(
@@ -202,7 +232,7 @@ def run_temporal_search(
     summary_frame = pd.DataFrame(summaries)
     summary_frame.to_csv(output / "search_summary.csv", index=False)
     manifest = {
-        "contract": "social_temporal_search_v1",
+        "contract": "social_temporal_search_v2",
         "embedding_dir": str(Path(embedding_dir).resolve()),
         "output_dir": str(output),
         "train_trials": train_trial_ids,
@@ -213,11 +243,15 @@ def run_temporal_search(
         "seeds": seeds,
         "pca_dims": pca_dims,
         "hmm_max_iter": hmm_max_iter,
+        "hmm_timestep_s": hmm_timestep_s,
+        "hmm_sticky_expected_duration_s": hmm_sticky_expected_duration_s,
+        "hmm_sticky_prior_strength": hmm_sticky_prior_strength,
         "hsmm_max_iter": hsmm_max_iter,
         "max_duration_timesteps": max_duration,
         "notes": [
             "Every trial and every valid run is passed as an independent sequence.",
             "No transitions are counted across trial boundaries or invalid clock gaps.",
+            "HMM stickiness is a Dirichlet transition prior derived from physical timestep and expected dwell time; it is not post-hoc bout deletion.",
             "A5_C5 is excluded from model selection because it was previously inspected.",
             "Likelihoods across different PCA dimensions are not directly rank-comparable.",
         ],
@@ -238,8 +272,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--pca-dim", nargs="+", type=int, default=[64, 16])
     parser.add_argument("--hmm-max-iter", type=int, default=40)
+    parser.add_argument("--hmm-timestep-s", type=float, default=0.04)
+    parser.add_argument("--hmm-sticky-expected-duration-s", type=float, default=2.0)
+    parser.add_argument("--hmm-sticky-prior-strength", type=float, default=50000.0)
     parser.add_argument("--hsmm-max-iter", type=int, default=20)
-    parser.add_argument("--max-duration", type=int, default=50)
+    parser.add_argument("--max-duration", type=int, default=200)
     parser.add_argument("--covariance-floor", type=float, default=1e-3)
     parser.add_argument("--tolerance", type=float, default=1e-4)
     return parser.parse_args()
@@ -257,6 +294,9 @@ def main() -> int:
         seeds=args.seed,
         pca_dims=args.pca_dim,
         hmm_max_iter=args.hmm_max_iter,
+        hmm_timestep_s=args.hmm_timestep_s,
+        hmm_sticky_expected_duration_s=args.hmm_sticky_expected_duration_s,
+        hmm_sticky_prior_strength=args.hmm_sticky_prior_strength,
         hsmm_max_iter=args.hsmm_max_iter,
         covariance_floor=args.covariance_floor,
         max_duration=args.max_duration,

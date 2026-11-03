@@ -1,0 +1,24 @@
+contract: social_gnn_rslds_completed_pilot_0p04_v1
+architecture: graph_full
+encoder_seed: 20261013
+encoder_seed_selection_rule: predetermined_smallest_seed
+observation_dim: 16
+timestep_s: 0.04
+train_trials: [A1_C1, A3_C3, A4_B4]
+development_trial: A4_C4
+excluded_trial: A5_C5
+grid:
+  - {K: 4, M: 4, seeds: [0, 1, 2]}
+  - {K: 6, M: 4, seeds: [0, 1, 2]}
+  - {K: 8, M: 4, seeds: [0, 1, 2]}
+  - {K: 6, M: 8, seeds: [0, 1, 2]}
+  - {K: 8, M: 8, seeds: [0, 1, 2]}
+fit:
+  inference: laplace_em_structured_meanfield
+  iterations: 50
+  development_inference_iterations: 25
+  workers: 3
+forecast:
+  horizons_steps: [1, 5, 10]
+  policy: unavailable_without_valid_online_filter
+output_dir: evaluation_runs/gnn_9dim_0p04_downstream_v2/rslds_pilot_v1/completed_finite_pilot
